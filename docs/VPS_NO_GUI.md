@@ -4,6 +4,16 @@ The VPS does not need a real desktop. Use a virtual display with `Xvfb`, view it
 temporarily through VNC over an SSH tunnel, sign in once, pair Google Messages,
 then run the bridge against that same Chrome profile.
 
+If you installed with `install/ubuntu22.sh`, use `gmweb` for the whole flow:
+
+```bash
+gmweb
+gmweb vnc-on
+gmweb vnc-off
+gmweb status
+gmweb restart
+```
+
 ## Why Not Cookies Only?
 
 Google Messages state is more than cookies: cookies, LocalStorage, IndexedDB,

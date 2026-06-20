@@ -23,7 +23,7 @@ The installer prepares:
 On the VPS:
 
 ```bash
-sudo systemctl start gmweb-vnc gmweb-novnc
+gmweb vnc-on
 ```
 
 On your own computer:
@@ -43,7 +43,7 @@ Sign in to Google Messages and scan the QR with your phone.
 After pairing:
 
 ```bash
-sudo systemctl stop gmweb-vnc gmweb-novnc
+gmweb vnc-off
 ```
 
 ## 3. Test
@@ -51,10 +51,12 @@ sudo systemctl stop gmweb-vnc gmweb-novnc
 On the VPS:
 
 ```bash
-gmweb-status
-gmweb-smoke
-gmweb-token
+gmweb status
+gmweb smoke
+gmweb token
 ```
+
+You can also type `gmweb` to open the full server menu.
 
 ## 4. Use API From Your Computer
 

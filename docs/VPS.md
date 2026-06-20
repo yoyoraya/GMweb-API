@@ -1,5 +1,17 @@
 # GMweb API VPS Setup
 
+For a fresh Ubuntu 22 server, prefer the automated installer and manager menu:
+
+```bash
+git clone https://github.com/yoyoraya/GMweb-API.git
+cd GMweb-API
+sudo bash install/ubuntu22.sh
+gmweb
+```
+
+The `gmweb` menu manages status, restart, logs, temporary VNC pairing access,
+token display, smoke tests, updates, and uninstall.
+
 ## 1. Install
 
 ```bash

@@ -114,6 +114,30 @@ Operations notes: [docs/OPERATIONS.md](docs/OPERATIONS.md)
 
 Simple setup path: [docs/SIMPLE_SETUP.md](docs/SIMPLE_SETUP.md)
 
+## VPS Manager
+
+The Ubuntu installer adds a server-side manager command:
+
+```bash
+gmweb
+```
+
+Useful shortcuts:
+
+```bash
+gmweb status
+gmweb restart
+gmweb restart-chrome
+gmweb vnc-on
+gmweb vnc-off
+gmweb token
+gmweb smoke
+gmweb uninstall
+```
+
+`gmweb uninstall` removes services, command wrappers, app files, browser
+profile data, and the service user after a typed confirmation.
+
 ## Production Notes
 
 - Set `NODE_ENV=production`.

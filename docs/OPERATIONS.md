@@ -1,5 +1,44 @@
 # GMweb API Operations
 
+## Server Manager
+
+On Ubuntu installs, run:
+
+```bash
+gmweb
+```
+
+The menu includes status, readiness, smoke test, restart, Chrome restart,
+temporary VNC/noVNC access, logs, update, token display, and uninstall.
+
+Non-interactive commands:
+
+```bash
+gmweb status
+gmweb restart
+gmweb restart-chrome
+gmweb vnc-on
+gmweb vnc-off
+gmweb logs api
+gmweb token
+gmweb smoke
+```
+
+## Uninstall
+
+Run:
+
+```bash
+gmweb uninstall
+```
+
+The uninstaller removes GMweb systemd services, `/usr/local/bin/gmweb*`
+commands, `/opt/gmweb-api`, the browser profile, cached session data, and the
+`gmweb` service user after you type `DELETE GMWEB`.
+
+Chrome and VNC packages are only removed if you type `REMOVE PACKAGES`, because
+they may be shared by other tools on the same VPS.
+
 ## Rotate API Token
 
 Generate a token:

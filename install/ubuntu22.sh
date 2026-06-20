@@ -17,6 +17,10 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+as_app_user() {
+  runuser -u "$APP_USER" -- bash -lc "$*"
+}
+
 if [[ "$(lsb_release -rs 2>/dev/null || true)" != "22.04" ]]; then
   echo "Warning: this installer is designed for Ubuntu 22.04."
 fi
@@ -84,9 +88,9 @@ if [[ ! -f "$APP_DIR/package-lock.json" ]]; then
 fi
 
 echo "==> Installing npm dependencies"
-sudo -u "$APP_USER" bash -lc "cd '$APP_DIR' && npm ci --omit=dev"
+as_app_user "cd '$APP_DIR' && npm ci --omit=dev"
 
-TOKEN="$(sudo -u "$APP_USER" bash -lc "cd '$APP_DIR' && node scripts/new-token.js")"
+TOKEN="$(as_app_user "cd '$APP_DIR' && node scripts/new-token.js")"
 if [[ ! -f "$APP_DIR/.env" ]]; then
   echo "==> Creating .env"
   cat > "$APP_DIR/.env" <<ENV
@@ -112,6 +116,36 @@ else
 fi
 
 chmod +x "$APP_DIR/scripts/vps-chrome.sh"
+chmod +x "$APP_DIR/scripts/gmweb-menu.sh" "$APP_DIR/scripts/uninstall.sh"
+
+echo "==> Installing gmweb command"
+ln -sf "$APP_DIR/scripts/gmweb-menu.sh" /usr/local/bin/gmweb
+cat > /usr/local/bin/gmweb-uninstall <<'SCRIPT'
+#!/usr/bin/env bash
+exec gmweb uninstall "$@"
+SCRIPT
+
+cat > /usr/local/bin/gmweb-token <<'SCRIPT'
+#!/usr/bin/env bash
+exec gmweb token "$@"
+SCRIPT
+cat > /usr/local/bin/gmweb-status <<'SCRIPT'
+#!/usr/bin/env bash
+exec gmweb status "$@"
+SCRIPT
+cat > /usr/local/bin/gmweb-smoke <<'SCRIPT'
+#!/usr/bin/env bash
+exec gmweb smoke "$@"
+SCRIPT
+cat > /usr/local/bin/gmweb-vnc-on <<'SCRIPT'
+#!/usr/bin/env bash
+exec gmweb vnc-on "$@"
+SCRIPT
+cat > /usr/local/bin/gmweb-vnc-off <<'SCRIPT'
+#!/usr/bin/env bash
+exec gmweb vnc-off "$@"
+SCRIPT
+chmod +x /usr/local/bin/gmweb-uninstall /usr/local/bin/gmweb-token /usr/local/bin/gmweb-status /usr/local/bin/gmweb-smoke /usr/local/bin/gmweb-vnc-on /usr/local/bin/gmweb-vnc-off
 
 echo "==> Installing systemd services"
 cat > /etc/systemd/system/gmweb-chrome.service <<SERVICE
@@ -190,7 +224,8 @@ WantedBy=multi-user.target
 SERVICE
 
 systemctl daemon-reload
-systemctl enable gmweb-chrome.service gmweb-api.service gmweb-vnc.service gmweb-novnc.service
+systemctl enable gmweb-chrome.service gmweb-api.service
+systemctl disable gmweb-vnc.service gmweb-novnc.service 2>/dev/null || true
 
 cat > "$APP_DIR/pairing-vnc.sh" <<SCRIPT
 #!/usr/bin/env bash
@@ -206,10 +241,12 @@ echo "==> Installed $APP_NAME"
 echo "App directory: $APP_DIR"
 echo "API token: $(grep '^API_TOKEN=' "$APP_DIR/.env" | sed 's/API_TOKEN=//')"
 echo
+echo "Manager menu: gmweb"
+echo
 echo "Next:"
-echo "1) systemctl start gmweb-chrome"
-echo "2) systemctl start gmweb-vnc gmweb-novnc"
+echo "1) gmweb start"
+echo "2) gmweb vnc-on"
 echo "3) From your laptop: ssh -L 6080:127.0.0.1:6080 root@SERVER_IP"
 echo "4) Open http://127.0.0.1:6080/vnc.html and pair Google Messages"
-echo "5) systemctl start gmweb-api"
-echo "6) cd $APP_DIR && npm run smoke"
+echo "5) gmweb vnc-off"
+echo "6) gmweb smoke"
