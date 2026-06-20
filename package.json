@@ -1,0 +1,23 @@
+{
+  "name": "gmweb-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GMweb API: OpenWA-style HTTP bridge for Google Messages for Web.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "login": "node src/openLoginChrome.js",
+    "smoke": "node scripts/smoke.js",
+    "doctor": "node scripts/doctor.js",
+    "token": "node scripts/new-token.js",
+    "check": "node --check src/server.js && node --check src/googleMessagesClient.js && node --check src/config.js && node --check src/openLoginChrome.js && node --check scripts/smoke.js && node --check scripts/doctor.js && node --check scripts/new-token.js && node --check ecosystem.config.cjs"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.0.1",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "playwright": "^1.49.1",
+    "zod": "^3.24.1"
+  }
+}
