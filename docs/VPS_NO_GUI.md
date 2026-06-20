@@ -15,7 +15,7 @@ Linux is also unreliable because cookie storage is OS-specific.
 
 ```bash
 sudo apt update
-sudo apt install -y curl wget gnupg xvfb x11vnc fluxbox
+sudo apt install -y curl wget gnupg xvfb x11vnc fluxbox novnc websockify
 
 wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
   | sudo gpg --dearmor -o /usr/share/keyrings/google-linux.gpg
@@ -42,16 +42,22 @@ In another SSH session, expose the virtual display with VNC bound to localhost:
 DISPLAY=:99 x11vnc -localhost -forever -shared -rfbport 5900
 ```
 
+Optional browser-based noVNC:
+
+```bash
+websockify --web=/usr/share/novnc/ 127.0.0.1:6080 127.0.0.1:5900
+```
+
 From your local machine:
 
 ```bash
-ssh -L 5900:127.0.0.1:5900 root@YOUR_SERVER_IP
+ssh -L 6080:127.0.0.1:6080 root@YOUR_SERVER_IP
 ```
 
-Open a local VNC viewer at:
+Open:
 
 ```text
-127.0.0.1:5900
+http://127.0.0.1:6080/vnc.html
 ```
 
 Sign in to Google, open Google Messages, scan the QR from your phone, and verify

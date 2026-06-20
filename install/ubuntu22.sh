@@ -23,7 +23,7 @@ fi
 
 echo "==> Installing system packages"
 apt-get update
-apt-get install -y ca-certificates curl wget gnupg git rsync tar xvfb x11vnc fluxbox
+apt-get install -y ca-certificates curl wget gnupg git rsync tar xvfb x11vnc fluxbox novnc websockify
 
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -p 'Number(process.versions.node.split(`.`)[0])')" -lt 20 ]]; then
   echo "==> Installing Node.js 22"
@@ -153,8 +153,43 @@ RestartSec=5
 WantedBy=multi-user.target
 SERVICE
 
+cat > /etc/systemd/system/gmweb-vnc.service <<SERVICE
+[Unit]
+Description=$APP_NAME pairing VNC bridge
+After=gmweb-chrome.service
+Wants=gmweb-chrome.service
+
+[Service]
+Type=simple
+User=$APP_USER
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/pairing-vnc.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+cat > /etc/systemd/system/gmweb-novnc.service <<SERVICE
+[Unit]
+Description=$APP_NAME noVNC web bridge
+After=gmweb-vnc.service
+Wants=gmweb-vnc.service
+
+[Service]
+Type=simple
+User=$APP_USER
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 127.0.0.1:6080 127.0.0.1:5900
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
 systemctl daemon-reload
-systemctl enable gmweb-chrome.service gmweb-api.service
+systemctl enable gmweb-chrome.service gmweb-api.service gmweb-vnc.service gmweb-novnc.service
 
 cat > "$APP_DIR/pairing-vnc.sh" <<SCRIPT
 #!/usr/bin/env bash
@@ -172,8 +207,8 @@ echo "API token: $(grep '^API_TOKEN=' "$APP_DIR/.env" | sed 's/API_TOKEN=//')"
 echo
 echo "Next:"
 echo "1) systemctl start gmweb-chrome"
-echo "2) sudo -u $APP_USER $APP_DIR/pairing-vnc.sh"
-echo "3) From your laptop: ssh -L 5900:127.0.0.1:5900 root@SERVER_IP"
-echo "4) Open VNC viewer at 127.0.0.1:5900 and pair Google Messages"
+echo "2) systemctl start gmweb-vnc gmweb-novnc"
+echo "3) From your laptop: ssh -L 6080:127.0.0.1:6080 root@SERVER_IP"
+echo "4) Open http://127.0.0.1:6080/vnc.html and pair Google Messages"
 echo "5) systemctl start gmweb-api"
 echo "6) cd $APP_DIR && npm run smoke"
