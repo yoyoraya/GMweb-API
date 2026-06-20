@@ -112,6 +112,8 @@ No-GUI Ubuntu VPS notes: [docs/VPS_NO_GUI.md](docs/VPS_NO_GUI.md)
 
 Operations notes: [docs/OPERATIONS.md](docs/OPERATIONS.md)
 
+Simple setup path: [docs/SIMPLE_SETUP.md](docs/SIMPLE_SETUP.md)
+
 ## Production Notes
 
 - Set `NODE_ENV=production`.

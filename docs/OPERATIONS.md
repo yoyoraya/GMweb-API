@@ -36,6 +36,18 @@ GET /ready
 
 It returns HTTP `200` when paired and HTTP `503` when not ready.
 
+## Speed
+
+For production, keep:
+
+```env
+POLL_INTERVAL_MS=0
+```
+
+This disables background polling so send requests are not delayed by page reads.
+Repeat sends are faster after the first successful send because recipient
+conversation hrefs are cached in `data/conversation-cache.json`.
+
 ## Local Doctor
 
 Run:

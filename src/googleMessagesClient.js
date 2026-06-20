@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { chromium } = require("playwright");
 
@@ -15,6 +16,7 @@ class GoogleMessagesClient extends EventEmitter {
     this.lastConversationFingerprint = new Map();
     this.startedAt = null;
     this.actionLock = Promise.resolve();
+    this.conversationCache = this.readConversationCache();
   }
 
   async start() {
@@ -152,6 +154,52 @@ class GoogleMessagesClient extends EventEmitter {
     const page = await this.ensurePage();
     await page.bringToFront().catch(() => {});
     await this.ensurePaired();
+
+    const openedExisting = await this.openConversationForRecipient(to);
+    if (!openedExisting) {
+      await this.startNewConversation(to);
+    }
+
+    await this.typeAndSend(text);
+
+    this.cacheRecipientConversation(to, page.url());
+
+    const event = {
+      type: "sent",
+      to,
+      text,
+      fastPath: openedExisting,
+      at: new Date().toISOString()
+    };
+    this.emit("message:sent", event);
+    return event;
+  }
+
+  async openConversationForRecipient(to) {
+    const page = await this.ensurePage();
+    const cached = this.getCachedRecipientConversation(to);
+    if (cached?.href) {
+      try {
+        await page.goto(new URL(cached.href, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
+        await this.waitForComposer(8000);
+        return true;
+      } catch {
+        this.deleteCachedRecipientConversation(to);
+      }
+    }
+
+    const conversations = await this.listConversationsUnlocked(80);
+    const match = conversations.find((conversation) => this.conversationMatchesRecipient(conversation, to));
+    if (!match?.href) return false;
+
+    await page.goto(new URL(match.href, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
+    await this.waitForComposer(10000);
+    this.cacheRecipientConversation(to, match.href, match.title);
+    return true;
+  }
+
+  async startNewConversation(to) {
+    const page = await this.ensurePage();
     await page.goto(`${MESSAGES_URL}/conversations`, { waitUntil: "domcontentloaded" }).catch(() => {});
 
     await this.clickFirst([
@@ -172,10 +220,22 @@ class GoogleMessagesClient extends EventEmitter {
     await recipientInput.fill(to);
     await page.keyboard.press("Enter");
 
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(500);
     await this.clickRecipientOption(to);
-    await page.waitForTimeout(1200);
+    await this.waitForComposer(12000);
+  }
 
+  async waitForComposer(timeout = 10000) {
+    const page = await this.ensurePage();
+    await page.waitForFunction(() => {
+      const text = document.body.innerText || "";
+      return /Text message|SMS|MMS|RCS/i.test(text)
+        || document.querySelector("[aria-label*='Text message' i], [aria-label*='Message' i], textarea, [contenteditable='true']");
+    }, null, { timeout }).catch(() => {});
+  }
+
+  async typeAndSend(text) {
+    const page = await this.ensurePage();
     const messageInput = await this.locatorFirst([
       "[aria-label*='Text message' i]",
       "[aria-label*='Message' i]",
@@ -196,15 +256,6 @@ class GoogleMessagesClient extends EventEmitter {
       "text=/^Send$/i"
     ]);
     if (!sendClicked) await page.keyboard.press("Enter");
-
-    const event = {
-      type: "sent",
-      to,
-      text,
-      at: new Date().toISOString()
-    };
-    this.emit("message:sent", event);
-    return event;
   }
 
   async listConversations(limit = 20) {
@@ -361,6 +412,64 @@ class GoogleMessagesClient extends EventEmitter {
     return null;
   }
 
+  conversationMatchesRecipient(conversation, to) {
+    const haystack = this.normalizePhone(conversation.text || `${conversation.title} ${conversation.snippet}`);
+    return this.phoneVariants(to).some((variant) => variant.length >= 7 && haystack.includes(variant));
+  }
+
+  normalizePhone(value) {
+    return String(value || "").replace(/\D/g, "");
+  }
+
+  phoneVariants(value) {
+    const digits = this.normalizePhone(value);
+    const variants = new Set([digits]);
+    if (digits.startsWith("98")) variants.add(`0${digits.slice(2)}`);
+    if (digits.startsWith("0")) variants.add(`98${digits.slice(1)}`);
+    if (digits.length > 10) variants.add(digits.slice(-10));
+    return [...variants].filter(Boolean);
+  }
+
+  recipientCacheKey(to) {
+    return this.phoneVariants(to).sort((a, b) => b.length - a.length)[0] || String(to);
+  }
+
+  readConversationCache() {
+    try {
+      if (!fs.existsSync(this.config.conversationCacheFile)) return { recipients: {} };
+      return JSON.parse(fs.readFileSync(this.config.conversationCacheFile, "utf8"));
+    } catch {
+      return { recipients: {} };
+    }
+  }
+
+  writeConversationCache() {
+    fs.mkdirSync(path.dirname(this.config.conversationCacheFile), { recursive: true });
+    fs.writeFileSync(this.config.conversationCacheFile, JSON.stringify(this.conversationCache, null, 2));
+  }
+
+  getCachedRecipientConversation(to) {
+    return this.conversationCache.recipients?.[this.recipientCacheKey(to)] || null;
+  }
+
+  cacheRecipientConversation(to, hrefOrUrl, title = "") {
+    const parsedUrl = new URL(hrefOrUrl, MESSAGES_URL);
+    if (!parsedUrl.pathname.includes("/web/conversations/")) return;
+    this.conversationCache.recipients ||= {};
+    this.conversationCache.recipients[this.recipientCacheKey(to)] = {
+      href: parsedUrl.pathname,
+      title,
+      updatedAt: new Date().toISOString()
+    };
+    this.writeConversationCache();
+  }
+
+  deleteCachedRecipientConversation(to) {
+    if (!this.conversationCache.recipients) return;
+    delete this.conversationCache.recipients[this.recipientCacheKey(to)];
+    this.writeConversationCache();
+  }
+
   async clickRecipientOption(to) {
     const page = await this.ensurePage();
     const normalizedLocal = to.replace(/^\+98/, "0");
@@ -512,6 +621,7 @@ class GoogleMessagesClient extends EventEmitter {
   }
 
   startPolling() {
+    if (this.config.pollIntervalMs <= 0) return;
     if (this.pollTimer) return;
     this.pollTimer = setInterval(() => {
       this.pollConversations().catch((error) => {
