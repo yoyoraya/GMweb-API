@@ -78,7 +78,11 @@ app.get("/health", async () => ({
 }));
 
 app.get("/ready", async (request, reply) => {
-  const status = await client.status();
+  let status = await client.status();
+  if (!status.paired && !status.qrVisible && !status.signInVisible) {
+    await client.listConversations(1).catch(() => {});
+    status = await client.status();
+  }
   if (!status.paired) reply.code(503);
   return {
     ready: status.paired,
