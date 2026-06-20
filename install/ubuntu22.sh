@@ -9,6 +9,8 @@ APP_PORT="${APP_PORT:-3030}"
 DISPLAY_ID="${DISPLAY_ID:-:99}"
 CDP_PORT="${CDP_PORT:-9222}"
 REPO_URL="${REPO_URL:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run as root: sudo bash install/ubuntu22.sh"
@@ -21,7 +23,7 @@ fi
 
 echo "==> Installing system packages"
 apt-get update
-apt-get install -y ca-certificates curl wget gnupg git tar xvfb x11vnc fluxbox
+apt-get install -y ca-certificates curl wget gnupg git rsync tar xvfb x11vnc fluxbox
 
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -p 'Number(process.versions.node.split(`.`)[0])')" -lt 20 ]]; then
   echo "==> Installing Node.js 22"
@@ -55,11 +57,31 @@ if [[ -n "$REPO_URL" ]]; then
     rm -rf "$APP_DIR"
     git clone "$REPO_URL" "$APP_DIR"
   fi
+elif [[ -f "$SOURCE_DIR/package.json" ]]; then
+  if [[ "$SOURCE_DIR" != "$APP_DIR" ]]; then
+    echo "No REPO_URL provided. Syncing project from $SOURCE_DIR to $APP_DIR."
+    rsync -a --delete \
+      --exclude ".git/" \
+      --exclude ".env" \
+      --exclude "data/" \
+      --exclude "node_modules/" \
+      "$SOURCE_DIR/" "$APP_DIR/"
+  else
+    echo "No REPO_URL provided. Using project files already in $APP_DIR."
+  fi
 else
-  echo "No REPO_URL provided. Assuming project files already exist in $APP_DIR."
+  echo "No REPO_URL provided and no package.json found next to this installer."
+  echo "Run from a cloned GMweb API repo or pass REPO_URL=https://github.com/.../GMweb-API.git"
+  exit 1
 fi
 
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+
+if [[ ! -f "$APP_DIR/package-lock.json" ]]; then
+  echo "package-lock.json not found in $APP_DIR."
+  echo "The app directory is not a complete GMweb API checkout."
+  exit 1
+fi
 
 echo "==> Installing npm dependencies"
 sudo -u "$APP_USER" bash -lc "cd '$APP_DIR' && npm ci --omit=dev"
