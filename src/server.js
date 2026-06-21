@@ -1,6 +1,7 @@
 const Fastify = require("fastify");
 const cors = require("@fastify/cors");
 const proxy = require("@fastify/http-proxy");
+const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { execFile, spawn } = require("node:child_process");
@@ -16,7 +17,7 @@ const app = Fastify({
 
 const client = new GoogleMessagesClient(config);
 const sseClients = new Set();
-const dashboardCookieName = "gmweb_dashboard";
+const dashboardSessionCookieName = "gmweb_session";
 const dashboardDir = path.join(config.rootDir, "public", "dashboard");
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
@@ -27,6 +28,7 @@ const contentTypes = {
   ".svg": "image/svg+xml"
 };
 const rateBuckets = new Map();
+const dashboardSessions = new Map();
 
 function corsOrigin(origin, callback) {
   if (!origin) return callback(null, true);
@@ -34,11 +36,19 @@ function corsOrigin(origin, callback) {
   callback(null, config.corsOrigins.includes(origin));
 }
 
-function applySecurityHeaders(_request, reply, done) {
+function applySecurityHeaders(request, reply, done) {
   reply.header("x-content-type-options", "nosniff");
   reply.header("x-frame-options", "SAMEORIGIN");
   reply.header("referrer-policy", "no-referrer");
   reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
+  reply.header("cross-origin-opener-policy", "same-origin");
+  reply.header("cross-origin-resource-policy", "same-origin");
+  if (!requestPath(request.url).startsWith("/vnc")) {
+    reply.header(
+      "content-security-policy",
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
+    );
+  }
   if (config.dashboardCookieSecure) {
     reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
   }
@@ -58,6 +68,76 @@ function checkRateLimit(request, key, max, windowMs) {
     allowed: bucket.count <= max,
     retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))
   };
+}
+
+function randomToken(bytes = 32) {
+  return crypto.randomBytes(bytes).toString("base64url");
+}
+
+function userAgentHash(request) {
+  return crypto
+    .createHash("sha256")
+    .update(String(request.headers["user-agent"] || ""))
+    .digest("base64url");
+}
+
+function cleanupDashboardSessions() {
+  const now = Date.now();
+  for (const [sessionId, session] of dashboardSessions) {
+    if (session.expiresAt <= now) dashboardSessions.delete(sessionId);
+  }
+}
+
+function createDashboardSession(request) {
+  cleanupDashboardSessions();
+  const sessionId = randomToken(32);
+  const csrfToken = randomToken(32);
+  const now = Date.now();
+  dashboardSessions.set(sessionId, {
+    csrfToken,
+    createdAt: now,
+    lastSeenAt: now,
+    expiresAt: now + config.dashboardSessionTtlMs,
+    userAgentHash: userAgentHash(request)
+  });
+  return { sessionId, csrfToken };
+}
+
+function dashboardSession(request) {
+  const sessionId = parseCookies(request.headers.cookie)[dashboardSessionCookieName] || "";
+  if (!sessionId) return null;
+  const session = dashboardSessions.get(sessionId);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    dashboardSessions.delete(sessionId);
+    return null;
+  }
+  if (config.dashboardBindUserAgent && session.userAgentHash !== userAgentHash(request)) {
+    dashboardSessions.delete(sessionId);
+    return null;
+  }
+  session.lastSeenAt = Date.now();
+  return { sessionId, ...session };
+}
+
+function clearDashboardSession(request) {
+  const sessionId = parseCookies(request.headers.cookie)[dashboardSessionCookieName] || "";
+  if (sessionId) dashboardSessions.delete(sessionId);
+}
+
+function sameOriginAllowed(request) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  if (config.corsOrigins.includes(origin)) return true;
+  const proto = request.headers["x-forwarded-proto"] || request.protocol || "http";
+  const host = request.headers["x-forwarded-host"] || request.headers.host;
+  return origin === `${proto}://${host}`;
+}
+
+function csrfAllowed(request, session) {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return true;
+  if (!sameOriginAllowed(request)) return false;
+  return request.headers["x-csrf-token"] === session.csrfToken;
 }
 
 function requestPath(url) {
@@ -83,8 +163,7 @@ function bearerToken(request) {
 
 function hasDashboardAccess(request) {
   if (!config.apiToken) return true;
-  const cookieToken = parseCookies(request.headers.cookie)[dashboardCookieName] || "";
-  return cookieToken === config.apiToken || bearerToken(request) === config.apiToken;
+  return Boolean(dashboardSession(request)) || bearerToken(request) === config.apiToken;
 }
 
 function isDashboardAsset(requestUrl) {
@@ -103,11 +182,16 @@ function requireToken(request, reply, done) {
     return;
   }
   if (!config.apiToken) return done();
-  if (bearerToken(request) !== config.apiToken) {
+  if (bearerToken(request) === config.apiToken) return done();
+
+  const session = dashboardSession(request);
+  if (session && csrfAllowed(request, session)) return done();
+
+  if (session) {
+    reply.code(403).send({ error: "csrf_failed" });
+  } else {
     reply.code(401).send({ error: "unauthorized" });
-    return;
   }
-  done();
 }
 
 function emitSse(event) {
@@ -249,6 +333,15 @@ if (config.dashboardEnabled) {
   app.get("/dashboard/", async (_request, reply) => sendDashboardFile(reply, "index.html"));
   app.get("/dashboard/:file", async (request, reply) => sendDashboardFile(reply, request.params.file));
 
+  app.get("/dashboard/session", async (request) => {
+    const session = dashboardSession(request);
+    return {
+      authenticated: Boolean(session),
+      csrfToken: session ? session.csrfToken : null,
+      expiresAt: session ? new Date(session.expiresAt).toISOString() : null
+    };
+  });
+
   app.post("/dashboard/login", async (request, reply) => {
     const limit = checkRateLimit(request, "dashboard-login", config.dashboardLoginMax, config.dashboardLoginWindowMs);
     if (!limit.allowed) {
@@ -262,15 +355,22 @@ if (config.dashboardEnabled) {
       reply.code(401).send({ error: "unauthorized" });
       return;
     }
+    const session = createDashboardSession(request);
     reply.header(
       "set-cookie",
-      `${dashboardCookieName}=${encodeURIComponent(parsed.data.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800${config.dashboardCookieSecure ? "; Secure" : ""}`
+      `${dashboardSessionCookieName}=${encodeURIComponent(session.sessionId)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(config.dashboardSessionTtlMs / 1000)}${config.dashboardCookieSecure ? "; Secure" : ""}`
     );
-    return { ok: true };
+    return { ok: true, csrfToken: session.csrfToken };
   });
 
-  app.post("/dashboard/logout", async (_request, reply) => {
-    reply.header("set-cookie", `${dashboardCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  app.post("/dashboard/logout", async (request, reply) => {
+    const session = dashboardSession(request);
+    if (session && !csrfAllowed(request, session)) {
+      reply.code(403).send({ error: "csrf_failed" });
+      return;
+    }
+    clearDashboardSession(request);
+    reply.header("set-cookie", `${dashboardSessionCookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${config.dashboardCookieSecure ? "; Secure" : ""}`);
     return { ok: true };
   });
 }

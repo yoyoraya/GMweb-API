@@ -164,7 +164,8 @@ gmweb public-dashboard install dashboard.example.com admin@example.com
 ```
 
 This installs Nginx/Certbot, proxies HTTPS traffic to the local API, supports
-the embedded noVNC WebSocket path, and switches dashboard cookies to `Secure`.
+the embedded noVNC WebSocket path, switches dashboard cookies to `Secure`, and
+adds Nginx Basic Auth in front of the dashboard.
 
 ## Production Notes
 

@@ -57,6 +57,8 @@ module.exports = {
   dashboardEnabled: boolFromEnv(process.env.DASHBOARD_ENABLED, true),
   adminActionsEnabled: boolFromEnv(process.env.ADMIN_ACTIONS_ENABLED, true),
   dashboardCookieSecure: boolFromEnv(process.env.DASHBOARD_COOKIE_SECURE, false),
+  dashboardSessionTtlMs: intFromEnv(process.env.DASHBOARD_SESSION_TTL_MS, 12 * 60 * 60 * 1000),
+  dashboardBindUserAgent: boolFromEnv(process.env.DASHBOARD_BIND_USER_AGENT, true),
   dashboardLoginWindowMs: intFromEnv(process.env.DASHBOARD_LOGIN_WINDOW_MS, 60000),
   dashboardLoginMax: intFromEnv(process.env.DASHBOARD_LOGIN_MAX, 20),
   adminActionWindowMs: intFromEnv(process.env.ADMIN_ACTION_WINDOW_MS, 60000),

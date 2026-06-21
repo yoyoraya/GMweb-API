@@ -72,6 +72,7 @@ Useful commands:
 
 ```bash
 gmweb public-dashboard status
+gmweb public-dashboard credentials
 gmweb public-dashboard remove dashboard.example.com
 ```
 
@@ -82,7 +83,8 @@ https://dashboard.example.com/dashboard
 ```
 
 The public setup sets `DASHBOARD_COOKIE_SECURE=true` and
-`CORS_ORIGIN=https://dashboard.example.com`.
+`CORS_ORIGIN=https://dashboard.example.com`. It also enables Nginx Basic Auth as
+a second authentication layer before the dashboard login.
 
 ## Rotate API Token
 

@@ -1,25 +1,21 @@
 const state = {
-  token: localStorage.getItem("gmwebToken") || "",
+  csrfToken: sessionStorage.getItem("gmwebCsrfToken") || "",
   vncPath: "/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify"
 };
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
-function authHeaders(extra = {}) {
-  return {
-    ...extra,
-    Authorization: `Bearer ${state.token}`
-  };
-}
-
 async function api(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(state.csrfToken ? { "X-CSRF-Token": state.csrfToken } : {}),
+    ...(options.headers || {})
+  };
   const response = await fetch(path, {
     ...options,
-    headers: authHeaders({
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    })
+    credentials: "same-origin",
+    headers
   });
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
@@ -79,22 +75,36 @@ async function refreshOverview() {
 async function login(token) {
   const response = await fetch("/dashboard/login", {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ token })
   });
   if (!response.ok) throw new Error("Invalid API token");
-  state.token = token;
-  localStorage.setItem("gmwebToken", token);
+  const data = await response.json();
+  state.csrfToken = data.csrfToken;
+  sessionStorage.setItem("gmwebCsrfToken", state.csrfToken);
   showApp(true);
   await refreshOverview();
 }
 
 async function logout() {
-  await fetch("/dashboard/logout", { method: "POST" }).catch(() => {});
-  localStorage.removeItem("gmwebToken");
-  state.token = "";
+  await api("/dashboard/logout", { method: "POST" }).catch(() => {});
+  sessionStorage.removeItem("gmwebCsrfToken");
+  state.csrfToken = "";
   $("#vncFrame").src = "about:blank";
   showApp(false);
+}
+
+async function restoreSession() {
+  const response = await fetch("/dashboard/session", { credentials: "same-origin" });
+  if (!response.ok) return false;
+  const session = await response.json();
+  if (!session.authenticated || !session.csrfToken) return false;
+  state.csrfToken = session.csrfToken;
+  sessionStorage.setItem("gmwebCsrfToken", state.csrfToken);
+  showApp(true);
+  await refreshOverview();
+  return true;
 }
 
 async function runAction(action) {
@@ -186,13 +196,10 @@ function bind() {
 }
 
 bind();
-if (state.token) {
-  $("#tokenInput").value = state.token;
-  login(state.token).catch(() => showApp(false));
-} else {
-  showApp(false);
-}
+restoreSession().then((ok) => {
+  if (!ok) showApp(false);
+}).catch(() => showApp(false));
 
 setInterval(() => {
-  if (state.token) refreshOverview().catch(() => {});
+  if (state.csrfToken) refreshOverview().catch(() => {});
 }, 8000);
