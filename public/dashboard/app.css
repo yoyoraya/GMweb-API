@@ -156,6 +156,10 @@ label {
   display: grid;
   place-items: center;
   padding: 24px;
+  background:
+    linear-gradient(135deg, rgba(114, 167, 255, 0.16), transparent 46%),
+    linear-gradient(180deg, #111214, #151719),
+    var(--bg);
 }
 
 .loginBox {
@@ -165,12 +169,35 @@ label {
   background: var(--panel);
   padding: 30px;
   text-align: center;
+  box-shadow: 0 22px 80px rgba(0, 0, 0, 0.34);
 }
 
 .loginBox form {
   display: grid;
   gap: 12px;
   margin-top: 22px;
+  text-align: left;
+}
+
+.authSteps {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.authSteps span {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  padding: 9px 10px;
+  font-size: 13px;
+}
+
+.authSteps span.active {
+  border-color: rgba(114, 167, 255, 0.7);
+  color: var(--text);
+  background: rgba(114, 167, 255, 0.12);
 }
 
 .appPanel {
@@ -178,7 +205,7 @@ label {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .topbar {

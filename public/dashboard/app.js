@@ -27,7 +27,7 @@ async function api(path, options = {}) {
 
 function showApp(unlocked) {
   $("#loginPanel").classList.toggle("hidden", unlocked);
-  $("#appPanel").classList.toggle("hidden", !unlocked);
+  $("#appShell").classList.toggle("hidden", !unlocked);
 }
 
 function showPasswordStep() {
@@ -35,6 +35,8 @@ function showPasswordStep() {
   $("#loginForm").classList.add("hidden");
   $("#loginHelp").textContent = "Sign in to continue.";
   $("#loginError").textContent = "";
+  $("#passwordStepLabel").classList.add("active");
+  $("#tokenStepLabel").classList.remove("active");
 }
 
 function showTokenStep() {
@@ -42,6 +44,8 @@ function showTokenStep() {
   $("#loginForm").classList.remove("hidden");
   $("#loginHelp").textContent = "Enter the API token to unlock the dashboard.";
   $("#loginError").textContent = "";
+  $("#passwordStepLabel").classList.remove("active");
+  $("#tokenStepLabel").classList.add("active");
 }
 
 function service(overview, name) {
@@ -78,7 +82,7 @@ async function refreshOverview() {
 
   state.vncPath = overview.vnc?.proxyPath || state.vncPath;
   setText("#buildVersion", `v${overview.version}`);
-  setText("#subtitle", `${overview.service} ${overview.version} · ${new Date(overview.now).toLocaleString()}`);
+  setText("#subtitle", `${overview.service} ${overview.version} - ${new Date(overview.now).toLocaleString()}`);
   setText("#pairingState", ready.ready ? "Paired" : "Not ready");
   setText("#pairingHint", cleanText(status.hint || status.title || ready.error || "-"));
   setText("#apiState", compactState(apiService.active));
@@ -138,6 +142,8 @@ async function restoreSession() {
     await refreshOverview();
     return true;
   }
+  sessionStorage.removeItem("gmwebCsrfToken");
+  state.csrfToken = "";
   showApp(false);
   if (session.passwordRequired && !session.passwordAuthenticated) {
     showPasswordStep();
@@ -189,10 +195,10 @@ async function sendMessage(event) {
 
 async function loadConversations() {
   const list = $("#conversationList");
-  list.innerHTML = "<div class=\"conversation\"><strong>Loading...</strong></div>";
+  list.replaceChildren(conversationMessage("Loading..."));
   try {
     const data = await api("/conversations?limit=12", { headers: { "Content-Type": "text/plain" } });
-    list.innerHTML = "";
+    list.replaceChildren();
     for (const item of data.conversations || []) {
       const row = document.createElement("div");
       row.className = "conversation";
@@ -203,11 +209,20 @@ async function loadConversations() {
       list.appendChild(row);
     }
     if (!list.children.length) {
-      list.innerHTML = "<div class=\"conversation\"><strong>No conversations</strong></div>";
+      list.replaceChildren(conversationMessage("No conversations"));
     }
   } catch (error) {
-    list.innerHTML = `<div class="conversation"><strong>${error.message}</strong></div>`;
+    list.replaceChildren(conversationMessage(error.message));
   }
+}
+
+function conversationMessage(message) {
+  const row = document.createElement("div");
+  row.className = "conversation";
+  const title = document.createElement("strong");
+  title.textContent = message;
+  row.appendChild(title);
+  return row;
 }
 
 function openVnc() {

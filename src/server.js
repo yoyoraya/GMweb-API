@@ -31,6 +31,7 @@ const contentTypes = {
 const rateBuckets = new Map();
 const dashboardSessions = new Map();
 const dashboardPasswordSessions = new Map();
+const dummyDashboardPasswordHash = "scrypt$v1$16384$8$1$aHInyzzd-xELadFCqewEOXskJ5E-EUJY$UUWVXTBwmOEPmu1yAIiq1mCAOTKFLv_WmAfqYSRzd8zlOtaUNx3KcADlnh6r5UWxbfoALvpmBxeTF7ELK9hITA";
 
 function corsOrigin(origin, callback) {
   if (!origin) return callback(null, true);
@@ -179,8 +180,14 @@ function parsePasswordHash(hash) {
   };
 }
 
-function verifyDashboardPassword(password) {
-  const parsed = parsePasswordHash(config.dashboardPasswordHash);
+function safeStringEqual(a, b) {
+  const left = crypto.createHash("sha256").update(String(a || "")).digest();
+  const right = crypto.createHash("sha256").update(String(b || "")).digest();
+  return crypto.timingSafeEqual(left, right);
+}
+
+function verifyDashboardPassword(password, hash = config.dashboardPasswordHash) {
+  const parsed = parsePasswordHash(hash);
   if (!parsed) return false;
   const expected = Buffer.from(parsed.derived, "base64url");
   const actual = crypto.scryptSync(String(password || ""), parsed.salt, expected.length, {
@@ -430,9 +437,12 @@ if (config.dashboardEnabled) {
       password: z.string().min(1).max(512)
     });
     const parsed = schema.safeParse(request.body || {});
-    const valid = parsed.success &&
-      parsed.data.username === config.dashboardUsername &&
-      verifyDashboardPassword(parsed.data.password);
+    const username = parsed.success ? parsed.data.username : "";
+    const password = parsed.success ? parsed.data.password : "";
+    const usernameValid = safeStringEqual(username, config.dashboardUsername);
+    const passwordHash = usernameValid ? config.dashboardPasswordHash : dummyDashboardPasswordHash;
+    const passwordValid = verifyDashboardPassword(password, passwordHash);
+    const valid = parsed.success && usernameValid && passwordValid;
     if (!valid) {
       reply.code(401).send({ error: "unauthorized" });
       return;

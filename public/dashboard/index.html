@@ -7,7 +7,38 @@
     <link rel="stylesheet" href="/dashboard/app.css">
   </head>
   <body>
-    <div class="shell">
+    <section id="loginPanel" class="loginPanel">
+      <div class="loginBox">
+        <div class="brandMark large">GM</div>
+        <h1>GMweb API</h1>
+        <p id="loginHelp">Sign in to continue.</p>
+        <div class="authSteps" aria-hidden="true">
+          <span id="passwordStepLabel" class="active">Password</span>
+          <span id="tokenStepLabel">API token</span>
+        </div>
+        <form id="passwordForm">
+          <label>
+            Username
+            <input id="usernameInput" type="text" autocomplete="username" placeholder="gmwebadmin" required>
+          </label>
+          <label>
+            Password
+            <input id="passwordInput" type="password" autocomplete="current-password" placeholder="Dashboard password" required>
+          </label>
+          <button type="submit" class="primary">Continue</button>
+        </form>
+        <form id="loginForm" class="hidden">
+          <label>
+            API token
+            <input id="tokenInput" type="password" autocomplete="current-password" placeholder="Paste API token" required>
+          </label>
+          <button type="submit" class="primary">Unlock dashboard</button>
+        </form>
+        <div id="loginError" class="errorText" role="alert"></div>
+      </div>
+    </section>
+
+    <div id="appShell" class="shell hidden">
       <aside class="sidebar">
         <div class="brand">
           <div class="brandMark">GM</div>
@@ -30,25 +61,7 @@
       </aside>
 
       <main class="main">
-        <section id="loginPanel" class="loginPanel">
-          <div class="loginBox">
-            <div class="brandMark large">GM</div>
-            <h1>GMweb API</h1>
-            <p id="loginHelp">Sign in to continue.</p>
-            <form id="passwordForm">
-              <input id="usernameInput" type="text" autocomplete="username" placeholder="Username">
-              <input id="passwordInput" type="password" autocomplete="current-password" placeholder="Password">
-              <button type="submit">Continue</button>
-            </form>
-            <form id="loginForm" class="hidden">
-              <input id="tokenInput" type="password" autocomplete="current-password" placeholder="API token">
-              <button type="submit">Unlock dashboard</button>
-            </form>
-            <div id="loginError" class="errorText"></div>
-          </div>
-        </section>
-
-        <section id="appPanel" class="appPanel hidden">
+        <section id="appPanel" class="appPanel">
           <header class="topbar">
             <div>
               <h1>Operations Dashboard</h1>

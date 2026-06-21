@@ -109,11 +109,6 @@ server {
 
   client_max_body_size 20m;
 
-  add_header X-Content-Type-Options "nosniff" always;
-  add_header X-Frame-Options "SAMEORIGIN" always;
-  add_header Referrer-Policy "no-referrer" always;
-  add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
-
   location = /dashboard/login {
     limit_req zone=gmweb_login burst=5 nodelay;
     proxy_pass http://127.0.0.1:$API_PORT;
