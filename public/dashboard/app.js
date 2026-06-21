@@ -63,7 +63,8 @@ async function refreshOverview() {
   const status = ready.status || {};
   const apiService = service(overview, "gmweb-api.service");
   const chromeService = service(overview, "gmweb-chrome.service");
-  const vncService = service(overview, "gmweb-novnc.service");
+  const vncService = service(overview, "gmweb-vnc.service");
+  const noVncService = service(overview, "gmweb-novnc.service");
 
   state.vncPath = overview.vnc?.proxyPath || state.vncPath;
   setText("#buildVersion", `v${overview.version}`);
@@ -72,7 +73,7 @@ async function refreshOverview() {
   setText("#pairingHint", cleanText(status.hint || status.title || ready.error || "-"));
   setText("#apiState", compactState(apiService.active));
   setText("#chromeState", compactState(chromeService.active));
-  setText("#vncState", compactState(vncService.active));
+  setText("#vncState", overview.vnc?.ready ? "Active" : `${compactState(vncService.active)} / ${compactState(noVncService.active)}`);
 }
 
 async function login(token) {

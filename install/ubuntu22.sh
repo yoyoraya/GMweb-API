@@ -124,7 +124,7 @@ else
   echo ".env already exists; not overwriting it."
 fi
 
-chmod +x "$APP_DIR/scripts/vps-chrome.sh"
+chmod +x "$APP_DIR/scripts/vps-chrome.sh" "$APP_DIR/scripts/pairing-vnc.sh"
 chmod +x "$APP_DIR/scripts/gmweb-menu.sh" "$APP_DIR/scripts/uninstall.sh" "$APP_DIR/scripts/public-dashboard.sh"
 
 echo "==> Installing gmweb command"
@@ -218,7 +218,8 @@ Wants=gmweb-chrome.service
 Type=simple
 User=$APP_USER
 WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/pairing-vnc.sh
+Environment=DISPLAY_ID=$DISPLAY_ID
+ExecStart=$APP_DIR/scripts/pairing-vnc.sh
 Restart=always
 RestartSec=5
 
@@ -246,15 +247,6 @@ SERVICE
 systemctl daemon-reload
 systemctl enable gmweb-chrome.service gmweb-api.service
 systemctl disable gmweb-vnc.service gmweb-novnc.service 2>/dev/null || true
-
-cat > "$APP_DIR/pairing-vnc.sh" <<SCRIPT
-#!/usr/bin/env bash
-set -euo pipefail
-export DISPLAY="$DISPLAY_ID"
-x11vnc -localhost -forever -shared -rfbport 5900
-SCRIPT
-chown "$APP_USER:$APP_USER" "$APP_DIR/pairing-vnc.sh"
-chmod +x "$APP_DIR/pairing-vnc.sh"
 
 echo
 echo "==> Installed $APP_NAME"

@@ -303,7 +303,9 @@ app.get("/admin/overview", async () => {
     adminActionsEnabled: config.adminActionsEnabled,
     vnc: {
       proxyPath: "/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify",
-      target: config.vncProxyTarget
+      target: config.vncProxyTarget,
+      ready: services.some((service) => service.name === "gmweb-vnc.service" && service.active === "active") &&
+        services.some((service) => service.name === "gmweb-novnc.service" && service.active === "active")
     },
     readiness,
     services
