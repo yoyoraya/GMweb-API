@@ -77,6 +77,9 @@ function cleanText(value) {
 function connectSSE() {
   if (sseSource) return;
   sseSource = new EventSource("/events");
+  sseSource.onopen = () => {
+    loadConversations(true);
+  };
   sseSource.onmessage = (e) => {
     let data;
     try { data = JSON.parse(e.data); } catch { return; }
@@ -341,5 +344,8 @@ restoreSession().then((ok) => {
 });
 
 setInterval(() => {
-  if (state.csrfToken) refreshOverview().catch(() => {});
+  if (state.csrfToken) {
+    refreshOverview().catch(() => {});
+    loadConversations(true).catch(() => {});
+  }
 }, 8000);
