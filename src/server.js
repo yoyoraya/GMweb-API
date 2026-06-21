@@ -10,7 +10,8 @@ const { GoogleMessagesClient } = require("./googleMessagesClient");
 const pkg = require("../package.json");
 
 const app = Fastify({
-  logger: true
+  logger: true,
+  trustProxy: true
 });
 
 const client = new GoogleMessagesClient(config);
@@ -25,6 +26,39 @@ const contentTypes = {
   ".png": "image/png",
   ".svg": "image/svg+xml"
 };
+const rateBuckets = new Map();
+
+function corsOrigin(origin, callback) {
+  if (!origin) return callback(null, true);
+  if (!config.corsOrigins.length) return callback(null, true);
+  callback(null, config.corsOrigins.includes(origin));
+}
+
+function applySecurityHeaders(_request, reply, done) {
+  reply.header("x-content-type-options", "nosniff");
+  reply.header("x-frame-options", "SAMEORIGIN");
+  reply.header("referrer-policy", "no-referrer");
+  reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
+  if (config.dashboardCookieSecure) {
+    reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+  }
+  done();
+}
+
+function checkRateLimit(request, key, max, windowMs) {
+  const now = Date.now();
+  const bucketKey = `${key}:${request.ip || request.socket?.remoteAddress || "unknown"}`;
+  let bucket = rateBuckets.get(bucketKey);
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { count: 0, resetAt: now + windowMs };
+  }
+  bucket.count += 1;
+  rateBuckets.set(bucketKey, bucket);
+  return {
+    allowed: bucket.count <= max,
+    retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))
+  };
+}
 
 function requestPath(url) {
   return String(url || "").split("?")[0] || "/";
@@ -106,7 +140,8 @@ client.on("message:sent", (event) => {
 });
 client.on("error", (error) => app.log.warn({ error }, "client error"));
 
-app.register(cors, { origin: true });
+app.register(cors, { origin: corsOrigin });
+app.addHook("onRequest", applySecurityHeaders);
 app.addHook("preHandler", requireToken);
 app.setErrorHandler((error, _request, reply) => {
   const statusCode = error.statusCode || 500;
@@ -215,6 +250,12 @@ if (config.dashboardEnabled) {
   app.get("/dashboard/:file", async (request, reply) => sendDashboardFile(reply, request.params.file));
 
   app.post("/dashboard/login", async (request, reply) => {
+    const limit = checkRateLimit(request, "dashboard-login", config.dashboardLoginMax, config.dashboardLoginWindowMs);
+    if (!limit.allowed) {
+      reply.header("retry-after", String(limit.retryAfterSeconds));
+      reply.code(429).send({ error: "rate_limited" });
+      return;
+    }
     const schema = z.object({ token: z.string().min(1) });
     const parsed = schema.safeParse(request.body || {});
     if (!parsed.success || (config.apiToken && parsed.data.token !== config.apiToken)) {
@@ -223,7 +264,7 @@ if (config.dashboardEnabled) {
     }
     reply.header(
       "set-cookie",
-      `${dashboardCookieName}=${encodeURIComponent(parsed.data.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`
+      `${dashboardCookieName}=${encodeURIComponent(parsed.data.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800${config.dashboardCookieSecure ? "; Secure" : ""}`
     );
     return { ok: true };
   });
@@ -270,6 +311,13 @@ app.get("/admin/overview", async () => {
 });
 
 app.post("/admin/action", async (request, reply) => {
+  const limit = checkRateLimit(request, "admin-action", config.adminActionMax, config.adminActionWindowMs);
+  if (!limit.allowed) {
+    reply.header("retry-after", String(limit.retryAfterSeconds));
+    reply.code(429).send({ error: "rate_limited" });
+    return;
+  }
+
   if (!config.adminActionsEnabled) {
     reply.code(403).send({ error: "admin_actions_disabled" });
     return;

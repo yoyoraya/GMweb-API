@@ -205,6 +205,16 @@ uninstall_app() {
   fi
 }
 
+public_dashboard() {
+  need_root "$@"
+  if [[ -x "$APP_DIR/scripts/public-dashboard.sh" ]]; then
+    "$APP_DIR/scripts/public-dashboard.sh" "$@"
+  else
+    echo "Public dashboard helper not found: $APP_DIR/scripts/public-dashboard.sh"
+    return 1
+  fi
+}
+
 render_menu() {
   clear || true
   echo "${C_BOLD}${C_BLUE}GMweb API Manager${C_RESET}"
@@ -222,6 +232,7 @@ render_menu() {
   echo " 10) Logs"
   echo " 11) Update from git"
   echo " 12) Uninstall GMweb API"
+  echo " 13) Public dashboard setup"
   echo "  0) Exit"
   echo
 }
@@ -249,6 +260,12 @@ menu_loop() {
         ;;
       11) update_app; pause ;;
       12) uninstall_app; exit 0 ;;
+      13)
+        read -r -p "Domain: " domain
+        read -r -p "Email for Let's Encrypt [optional]: " email
+        public_dashboard install "$domain" "$email"
+        pause
+        ;;
       0) exit 0 ;;
       *) echo "${C_RED}Invalid option.${C_RESET}"; pause ;;
     esac
@@ -273,6 +290,7 @@ case "$cmd" in
   logs) logs "$@" ;;
   update) update_app "$@" ;;
   uninstall) uninstall_app "$@" ;;
+  public-dashboard) public_dashboard "$@" ;;
   -h|--help|help)
     cat <<HELP
 Usage: gmweb [command]
@@ -292,6 +310,7 @@ Commands:
   logs [target]    Follow logs: api, chrome, vnc, novnc
   update           Git pull, npm ci, restart API
   uninstall        Remove GMweb API from the server
+  public-dashboard Manage public HTTPS dashboard exposure
 HELP
     ;;
   *)

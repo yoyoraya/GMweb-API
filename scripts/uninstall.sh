@@ -95,6 +95,18 @@ remove_commands() {
     /usr/local/bin/gmweb-uninstall
 }
 
+remove_public_dashboard() {
+  echo "==> Removing public dashboard proxy files"
+  rm -f \
+    /etc/nginx/sites-enabled/gmweb-api.conf \
+    /etc/nginx/sites-available/gmweb-api.conf \
+    /etc/nginx/conf.d/gmweb-api-websocket-map.conf \
+    /etc/sudoers.d/gmweb-api
+  if command -v nginx >/dev/null 2>&1; then
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
+  fi
+}
+
 remove_files_and_user() {
   echo "==> Removing app directory"
   rm -rf "$APP_DIR"
@@ -127,6 +139,7 @@ maybe_purge_packages() {
 confirm
 remove_services
 remove_commands
+remove_public_dashboard
 remove_files_and_user
 maybe_purge_packages
 

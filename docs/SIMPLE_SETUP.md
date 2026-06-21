@@ -83,6 +83,23 @@ http://127.0.0.1:3030/dashboard
 Enter the API token. The dashboard includes status, send, conversations,
 restart controls, VNC on/off, and an embedded noVNC console.
 
+## 6. Make The Dashboard Public
+
+Point a domain to the VPS, then run:
+
+```bash
+gmweb public-dashboard install dashboard.example.com admin@example.com
+```
+
+After that, open:
+
+```text
+https://dashboard.example.com/dashboard
+```
+
+Do not expose `3030` directly. The public setup keeps the API local and exposes
+only HTTPS through Nginx.
+
 ## Speed Notes
 
 `POLL_INTERVAL_MS=0` is the default production setting. This prevents background

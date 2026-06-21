@@ -22,6 +22,15 @@ for normal management:
 ssh -L 3030:127.0.0.1:3030 root@YOUR_SERVER_IP
 ```
 
+For public access without SSH, point a domain to the VPS and run:
+
+```bash
+gmweb public-dashboard install dashboard.example.com admin@example.com
+```
+
+This publishes `/dashboard` and `/vnc` through HTTPS while keeping Chrome CDP,
+VNC, noVNC, and the Node API bound to localhost.
+
 ## Why Not Cookies Only?
 
 Google Messages state is more than cookies: cookies, LocalStorage, IndexedDB,

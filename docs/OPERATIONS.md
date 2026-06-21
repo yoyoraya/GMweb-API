@@ -54,6 +54,36 @@ Production VPS installs create a limited sudoers file at
 `/etc/sudoers.d/gmweb-api` so the `gmweb` service user can only start/stop VNC
 and restart GMweb services from the dashboard.
 
+## Public HTTPS Dashboard
+
+Do not expose port `3030` directly to the internet. Keep:
+
+```env
+HOST=127.0.0.1
+```
+
+Then publish the dashboard through Nginx and Let's Encrypt:
+
+```bash
+gmweb public-dashboard install dashboard.example.com admin@example.com
+```
+
+Useful commands:
+
+```bash
+gmweb public-dashboard status
+gmweb public-dashboard remove dashboard.example.com
+```
+
+After install, open:
+
+```text
+https://dashboard.example.com/dashboard
+```
+
+The public setup sets `DASHBOARD_COOKIE_SECURE=true` and
+`CORS_ORIGIN=https://dashboard.example.com`.
+
 ## Rotate API Token
 
 Generate a token:

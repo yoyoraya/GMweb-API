@@ -156,6 +156,16 @@ On a VPS, open it from your computer with one SSH tunnel:
 ssh -L 3030:127.0.0.1:3030 root@SERVER_IP
 ```
 
+To expose the dashboard publicly, keep the API bound to `127.0.0.1` and put
+Nginx with HTTPS in front:
+
+```bash
+gmweb public-dashboard install dashboard.example.com admin@example.com
+```
+
+This installs Nginx/Certbot, proxies HTTPS traffic to the local API, supports
+the embedded noVNC WebSocket path, and switches dashboard cookies to `Secure`.
+
 ## Production Notes
 
 - Set `NODE_ENV=production`.

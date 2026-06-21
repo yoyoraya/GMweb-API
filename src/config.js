@@ -14,6 +14,11 @@ function intFromEnv(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function listFromEnv(value) {
+  if (!value) return [];
+  return String(value).split(",").map((item) => item.trim()).filter(Boolean);
+}
+
 const rootDir = path.resolve(__dirname, "..");
 
 function findChromeExecutable() {
@@ -48,7 +53,13 @@ module.exports = {
   webhookUrl: process.env.WEBHOOK_URL || "",
   enableDebugRoutes: boolFromEnv(process.env.ENABLE_DEBUG_ROUTES, false),
   publicHealth: boolFromEnv(process.env.PUBLIC_HEALTH, true),
+  corsOrigins: listFromEnv(process.env.CORS_ORIGIN),
   dashboardEnabled: boolFromEnv(process.env.DASHBOARD_ENABLED, true),
   adminActionsEnabled: boolFromEnv(process.env.ADMIN_ACTIONS_ENABLED, true),
+  dashboardCookieSecure: boolFromEnv(process.env.DASHBOARD_COOKIE_SECURE, false),
+  dashboardLoginWindowMs: intFromEnv(process.env.DASHBOARD_LOGIN_WINDOW_MS, 60000),
+  dashboardLoginMax: intFromEnv(process.env.DASHBOARD_LOGIN_MAX, 20),
+  adminActionWindowMs: intFromEnv(process.env.ADMIN_ACTION_WINDOW_MS, 60000),
+  adminActionMax: intFromEnv(process.env.ADMIN_ACTION_MAX, 60),
   vncProxyTarget: process.env.VNC_PROXY_TARGET || "http://127.0.0.1:6080"
 };

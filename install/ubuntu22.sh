@@ -108,8 +108,14 @@ CONVERSATION_CACHE_FILE=./data/conversation-cache.json
 WEBHOOK_URL=
 ENABLE_DEBUG_ROUTES=false
 PUBLIC_HEALTH=true
+CORS_ORIGIN=
 DASHBOARD_ENABLED=true
 ADMIN_ACTIONS_ENABLED=true
+DASHBOARD_COOKIE_SECURE=false
+DASHBOARD_LOGIN_WINDOW_MS=60000
+DASHBOARD_LOGIN_MAX=20
+ADMIN_ACTION_WINDOW_MS=60000
+ADMIN_ACTION_MAX=60
 VNC_PROXY_TARGET=http://127.0.0.1:6080
 ENV
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
@@ -119,7 +125,7 @@ else
 fi
 
 chmod +x "$APP_DIR/scripts/vps-chrome.sh"
-chmod +x "$APP_DIR/scripts/gmweb-menu.sh" "$APP_DIR/scripts/uninstall.sh"
+chmod +x "$APP_DIR/scripts/gmweb-menu.sh" "$APP_DIR/scripts/uninstall.sh" "$APP_DIR/scripts/public-dashboard.sh"
 
 echo "==> Installing gmweb command"
 ln -sf "$APP_DIR/scripts/gmweb-menu.sh" /usr/local/bin/gmweb
@@ -265,3 +271,6 @@ echo "3) From your laptop: ssh -L 6080:127.0.0.1:6080 root@SERVER_IP"
 echo "4) Open http://127.0.0.1:6080/vnc.html and pair Google Messages"
 echo "5) gmweb vnc-off"
 echo "6) gmweb smoke"
+echo
+echo "Optional public dashboard:"
+echo "gmweb public-dashboard install dashboard.example.com admin@example.com"
