@@ -289,6 +289,14 @@ async function loadConversations(silent = false) {
       const strong = document.createElement("strong");
       strong.textContent = item.title || item.name || "Untitled";
       titleDiv.appendChild(strong);
+
+      if (item.pinned) {
+        const pin = document.createElement("span");
+        pin.className = "pinIcon";
+        pin.textContent = "📌";
+        titleDiv.appendChild(pin);
+      }
+
       row.appendChild(titleDiv);
 
       const ts = document.createElement("small");
@@ -304,6 +312,7 @@ async function loadConversations(silent = false) {
         if (id) { newMessageMap.delete(id); saveNewMessageMap(newMessageMap); }
         row.classList.remove("unread");
         updateConversationsHeader();
+        loadConversationMessages(item);
       });
 
       list.appendChild(row);
@@ -314,6 +323,41 @@ async function loadConversations(silent = false) {
     updateConversationsHeader();
   } catch (error) {
     if (!silent) list.replaceChildren(conversationMessage(error.message));
+  }
+}
+
+async function loadConversationMessages(item) {
+  const panel = $("#messagePanel");
+  const list = $("#messageList");
+  const stateEl = $("#msgLoadState");
+  panel.classList.remove("hidden");
+  $("#messagePanelTitle").textContent = item.title || "Messages";
+  stateEl.textContent = "Loading";
+  stateEl.className = "pill";
+  list.replaceChildren();
+  try {
+    const data = await api("/conversations/messages", {
+      method: "POST",
+      body: JSON.stringify({ href: item.href })
+    });
+    list.replaceChildren();
+    for (const msg of data.messages || []) {
+      const div = document.createElement("div");
+      if (msg.type === "timestamp") {
+        div.className = "msg ts";
+        div.textContent = msg.text;
+      } else {
+        div.className = `msg ${msg.direction || "in"}`;
+        div.textContent = msg.text;
+      }
+      list.appendChild(div);
+    }
+    list.scrollTop = list.scrollHeight;
+    stateEl.textContent = `${(data.messages || []).filter(m => m.type === "message").length} msgs`;
+    stateEl.className = "pill ok";
+  } catch (error) {
+    stateEl.textContent = error.message;
+    stateEl.className = "pill bad";
   }
 }
 
@@ -359,6 +403,7 @@ function bind() {
     saveNewMessageMap(newMessageMap);
     loadConversations();
   });
+  $("#closeMsgBtn").addEventListener("click", () => $("#messagePanel").classList.add("hidden"));
   $("#openVncBtn").addEventListener("click", openVnc);
   $("#reloadVncBtn").addEventListener("click", openVnc);
   $$("[data-action]").forEach((button) => {

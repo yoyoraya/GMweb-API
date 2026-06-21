@@ -328,6 +328,9 @@ class GoogleMessagesClient extends EventEmitter {
             try { return parseInt(window.getComputedStyle(el).fontWeight) >= 600; } catch { return false; }
           })();
           const unread = unreadCount > 0 || /\bunread\b/i.test(ariaLabel) || titleBold || snippetBold;
+          const pinned = node.innerHTML?.includes("push_pin") ||
+                         /\bpinned\b/i.test(ariaLabel) ||
+                         !!node.querySelector?.("[data-mat-icon-name='push_pin']");
           return {
             id,
             index,
@@ -337,7 +340,8 @@ class GoogleMessagesClient extends EventEmitter {
             timestamp,
             text,
             unread,
-            unreadCount
+            unreadCount,
+            pinned
           };
         })
         .filter((row) => row.text && row.text.length > 2)
@@ -691,17 +695,22 @@ class GoogleMessagesClient extends EventEmitter {
 
   async locatorFirst(selectors) {
     const page = await this.ensurePage();
-    const errors = [];
-    for (const selector of selectors) {
-      const locator = page.locator(selector).first();
-      try {
-        await locator.waitFor({ state: "visible", timeout: 5000 });
-        return locator;
-      } catch (error) {
-        errors.push(`${selector}: ${error.message.split("\n")[0]}`);
+    return new Promise((resolve, reject) => {
+      let done = false;
+      let pending = selectors.length;
+      const missed = [];
+      for (const selector of selectors) {
+        const loc = page.locator(selector).first();
+        loc.waitFor({ state: "visible", timeout: 5000 })
+          .then(() => { if (!done) { done = true; resolve(loc); } })
+          .catch((err) => {
+            missed.push(selector);
+            if (--pending === 0 && !done) {
+              reject(new Error(`Element not found. Tried: ${missed.join(", ")}`));
+            }
+          });
       }
-    }
-    throw new Error(`Could not find element. Tried: ${errors.join(" | ")}`);
+    });
   }
 
   async clickFirst(selectors, label) {

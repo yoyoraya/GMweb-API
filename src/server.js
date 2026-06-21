@@ -755,6 +755,7 @@ async function main() {
   }
   await loadSessions();
   await app.listen({ host: config.host, port: config.port });
+  client.start().catch((error) => app.log.warn({ error }, "auto browser start failed"));
 }
 
 async function shutdown(signal) {
