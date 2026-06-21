@@ -72,6 +72,17 @@ Then call:
 curl -H "Authorization: Bearer TOKEN" http://127.0.0.1:3030/ready
 ```
 
+## 5. Use The Dashboard
+
+With the same tunnel open, visit:
+
+```text
+http://127.0.0.1:3030/dashboard
+```
+
+Enter the API token. The dashboard includes status, send, conversations,
+restart controls, VNC on/off, and an embedded noVNC console.
+
 ## Speed Notes
 
 `POLL_INTERVAL_MS=0` is the default production setting. This prevents background

@@ -27,7 +27,7 @@ fi
 
 echo "==> Installing system packages"
 apt-get update
-apt-get install -y ca-certificates curl wget gnupg git rsync tar xvfb x11vnc fluxbox novnc websockify
+apt-get install -y ca-certificates curl wget gnupg git rsync sudo tar xvfb x11vnc fluxbox novnc websockify
 
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -p 'Number(process.versions.node.split(`.`)[0])')" -lt 20 ]]; then
   echo "==> Installing Node.js 22"
@@ -108,6 +108,9 @@ CONVERSATION_CACHE_FILE=./data/conversation-cache.json
 WEBHOOK_URL=
 ENABLE_DEBUG_ROUTES=false
 PUBLIC_HEALTH=true
+DASHBOARD_ENABLED=true
+ADMIN_ACTIONS_ENABLED=true
+VNC_PROXY_TARGET=http://127.0.0.1:6080
 ENV
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
@@ -146,6 +149,17 @@ cat > /usr/local/bin/gmweb-vnc-off <<'SCRIPT'
 exec gmweb vnc-off "$@"
 SCRIPT
 chmod +x /usr/local/bin/gmweb-uninstall /usr/local/bin/gmweb-token /usr/local/bin/gmweb-status /usr/local/bin/gmweb-smoke /usr/local/bin/gmweb-vnc-on /usr/local/bin/gmweb-vnc-off
+
+SYSTEMCTL_BIN="$(command -v systemctl)"
+echo "==> Installing limited sudo rules for dashboard controls"
+cat > /etc/sudoers.d/gmweb-api <<SUDOERS
+$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN start gmweb-vnc.service gmweb-novnc.service
+$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN stop gmweb-novnc.service gmweb-vnc.service
+$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN restart gmweb-api.service
+$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN restart gmweb-chrome.service
+SUDOERS
+chmod 440 /etc/sudoers.d/gmweb-api
+visudo -cf /etc/sudoers.d/gmweb-api >/dev/null
 
 echo "==> Installing systemd services"
 cat > /etc/systemd/system/gmweb-chrome.service <<SERVICE
@@ -242,6 +256,7 @@ echo "App directory: $APP_DIR"
 echo "API token: $(grep '^API_TOKEN=' "$APP_DIR/.env" | sed 's/API_TOKEN=//')"
 echo
 echo "Manager menu: gmweb"
+echo "Dashboard: http://127.0.0.1:$APP_PORT/dashboard"
 echo
 echo "Next:"
 echo "1) gmweb start"

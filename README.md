@@ -138,6 +138,24 @@ gmweb uninstall
 `gmweb uninstall` removes services, command wrappers, app files, browser
 profile data, and the service user after a typed confirmation.
 
+## Dashboard
+
+The API serves a built-in dashboard:
+
+```text
+http://127.0.0.1:3030/dashboard
+```
+
+Use the same `API_TOKEN` to unlock it. The dashboard can show readiness,
+systemd service state, conversations, send messages, restart the browser/API,
+turn noVNC on and off, and embed the noVNC console through `/vnc`.
+
+On a VPS, open it from your computer with one SSH tunnel:
+
+```bash
+ssh -L 3030:127.0.0.1:3030 root@SERVER_IP
+```
+
 ## Production Notes
 
 - Set `NODE_ENV=production`.

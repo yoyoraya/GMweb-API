@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GMweb API Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/app.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brandMark">GM</div>
+          <div>
+            <strong>GMweb API</strong>
+            <span>Google Messages Bridge</span>
+          </div>
+        </div>
+        <nav class="nav">
+          <a href="#overview" class="active">Overview</a>
+          <a href="#send">Send</a>
+          <a href="#conversations">Conversations</a>
+          <a href="#vnc">VNC</a>
+          <a href="#controls">Controls</a>
+        </nav>
+        <div class="sidebarFoot">
+          <span id="buildVersion">v0.1.0</span>
+          <button id="logoutBtn" class="ghost">Logout</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <section id="loginPanel" class="loginPanel">
+          <div class="loginBox">
+            <div class="brandMark large">GM</div>
+            <h1>GMweb API</h1>
+            <p>Enter the API token to manage this instance.</p>
+            <form id="loginForm">
+              <input id="tokenInput" type="password" autocomplete="current-password" placeholder="API token">
+              <button type="submit">Unlock</button>
+            </form>
+            <div id="loginError" class="errorText"></div>
+          </div>
+        </section>
+
+        <section id="appPanel" class="appPanel hidden">
+          <header class="topbar">
+            <div>
+              <h1>Operations Dashboard</h1>
+              <p id="subtitle">Waiting for status...</p>
+            </div>
+            <div class="topActions">
+              <button id="refreshBtn" class="secondary">Refresh</button>
+              <button data-action="restart-api" class="primary">Restart API</button>
+            </div>
+          </header>
+
+          <section id="overview" class="metricGrid">
+            <article class="metric">
+              <span>Pairing</span>
+              <strong id="pairingState">Unknown</strong>
+              <small id="pairingHint">-</small>
+            </article>
+            <article class="metric">
+              <span>API</span>
+              <strong id="apiState">Unknown</strong>
+              <small>localhost:3030</small>
+            </article>
+            <article class="metric">
+              <span>Chrome</span>
+              <strong id="chromeState">Unknown</strong>
+              <small>CDP localhost:9222</small>
+            </article>
+            <article class="metric">
+              <span>VNC</span>
+              <strong id="vncState">Unknown</strong>
+              <small>proxied through /vnc</small>
+            </article>
+          </section>
+
+          <section class="workspace">
+            <div class="leftColumn">
+              <section id="send" class="panel">
+                <div class="panelHead">
+                  <h2>Send Message</h2>
+                  <span id="sendState" class="pill">Idle</span>
+                </div>
+                <form id="sendForm" class="sendForm">
+                  <label>
+                    To
+                    <input id="toInput" type="tel" placeholder="+989121234567">
+                  </label>
+                  <label>
+                    Text
+                    <textarea id="textInput" rows="5" placeholder="Message text"></textarea>
+                  </label>
+                  <button type="submit" class="primary">Send</button>
+                </form>
+              </section>
+
+              <section id="conversations" class="panel">
+                <div class="panelHead">
+                  <h2>Conversations</h2>
+                  <button id="loadConversationsBtn" class="secondary">Load</button>
+                </div>
+                <div id="conversationList" class="conversationList"></div>
+              </section>
+            </div>
+
+            <div class="rightColumn">
+              <section id="controls" class="panel">
+                <div class="panelHead">
+                  <h2>Controls</h2>
+                  <span id="actionState" class="pill">Ready</span>
+                </div>
+                <div class="controlGrid">
+                  <button data-action="browser-start">Start Browser</button>
+                  <button data-action="browser-restart">Restart Browser</button>
+                  <button data-action="restart-chrome">Restart Chrome</button>
+                  <button data-action="vnc-on">VNC On</button>
+                  <button data-action="vnc-off">VNC Off</button>
+                  <button data-action="smoke">Smoke Test</button>
+                </div>
+              </section>
+
+              <section id="vnc" class="panel vncPanel">
+                <div class="panelHead">
+                  <h2>VNC Console</h2>
+                  <div class="vncActions">
+                    <button id="openVncBtn" class="secondary">Open</button>
+                    <button id="reloadVncBtn" class="secondary">Reload</button>
+                  </div>
+                </div>
+                <iframe id="vncFrame" title="GMweb VNC console"></iframe>
+              </section>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <script src="/dashboard/app.js"></script>
+  </body>
+</html>

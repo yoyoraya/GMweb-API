@@ -39,6 +39,21 @@ commands, `/opt/gmweb-api`, the browser profile, cached session data, and the
 Chrome and VNC packages are only removed if you type `REMOVE PACKAGES`, because
 they may be shared by other tools on the same VPS.
 
+## Dashboard
+
+Open:
+
+```text
+http://127.0.0.1:3030/dashboard
+```
+
+The dashboard uses the same `API_TOKEN`. It also sets an HttpOnly dashboard
+cookie so the embedded noVNC iframe can access `/vnc`.
+
+Production VPS installs create a limited sudoers file at
+`/etc/sudoers.d/gmweb-api` so the `gmweb` service user can only start/stop VNC
+and restart GMweb services from the dashboard.
+
 ## Rotate API Token
 
 Generate a token:

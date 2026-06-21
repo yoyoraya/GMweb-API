@@ -47,5 +47,8 @@ module.exports = {
   conversationCacheFile: path.resolve(rootDir, process.env.CONVERSATION_CACHE_FILE || "./data/conversation-cache.json"),
   webhookUrl: process.env.WEBHOOK_URL || "",
   enableDebugRoutes: boolFromEnv(process.env.ENABLE_DEBUG_ROUTES, false),
-  publicHealth: boolFromEnv(process.env.PUBLIC_HEALTH, true)
+  publicHealth: boolFromEnv(process.env.PUBLIC_HEALTH, true),
+  dashboardEnabled: boolFromEnv(process.env.DASHBOARD_ENABLED, true),
+  adminActionsEnabled: boolFromEnv(process.env.ADMIN_ACTIONS_ENABLED, true),
+  vncProxyTarget: process.env.VNC_PROXY_TARGET || "http://127.0.0.1:6080"
 };

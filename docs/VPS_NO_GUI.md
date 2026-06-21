@@ -14,6 +14,14 @@ gmweb status
 gmweb restart
 ```
 
+The same install also serves the dashboard at `/dashboard`. The dashboard can
+turn noVNC on and embed it through `/vnc`, so one tunnel to port `3030` is enough
+for normal management:
+
+```bash
+ssh -L 3030:127.0.0.1:3030 root@YOUR_SERVER_IP
+```
+
 ## Why Not Cookies Only?
 
 Google Messages state is more than cookies: cookies, LocalStorage, IndexedDB,

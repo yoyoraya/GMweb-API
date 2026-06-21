@@ -88,6 +88,7 @@ status() {
   echo
   echo "App directory: $APP_DIR"
   echo "API URL:       $API_URL"
+  echo "Dashboard:    $API_URL/dashboard"
   if [[ -n "$(token || true)" ]]; then
     echo "API token:     configured"
   else
