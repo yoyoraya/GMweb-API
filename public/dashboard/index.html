@@ -34,10 +34,15 @@
           <div class="loginBox">
             <div class="brandMark large">GM</div>
             <h1>GMweb API</h1>
-            <p>Enter the API token to manage this instance.</p>
-            <form id="loginForm">
+            <p id="loginHelp">Sign in to continue.</p>
+            <form id="passwordForm">
+              <input id="usernameInput" type="text" autocomplete="username" placeholder="Username">
+              <input id="passwordInput" type="password" autocomplete="current-password" placeholder="Password">
+              <button type="submit">Continue</button>
+            </form>
+            <form id="loginForm" class="hidden">
               <input id="tokenInput" type="password" autocomplete="current-password" placeholder="API token">
-              <button type="submit">Unlock</button>
+              <button type="submit">Unlock dashboard</button>
             </form>
             <div id="loginError" class="errorText"></div>
           </div>

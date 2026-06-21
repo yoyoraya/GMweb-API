@@ -18,6 +18,7 @@ const app = Fastify({
 const client = new GoogleMessagesClient(config);
 const sseClients = new Set();
 const dashboardSessionCookieName = "gmweb_session";
+const dashboardPasswordCookieName = "gmweb_login";
 const dashboardDir = path.join(config.rootDir, "public", "dashboard");
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
@@ -29,6 +30,7 @@ const contentTypes = {
 };
 const rateBuckets = new Map();
 const dashboardSessions = new Map();
+const dashboardPasswordSessions = new Map();
 
 function corsOrigin(origin, callback) {
   if (!origin) return callback(null, true);
@@ -70,6 +72,10 @@ function checkRateLimit(request, key, max, windowMs) {
   };
 }
 
+function passwordAuthEnabled() {
+  return Boolean(config.dashboardUsername && config.dashboardPasswordHash);
+}
+
 function randomToken(bytes = 32) {
   return crypto.randomBytes(bytes).toString("base64url");
 }
@@ -86,6 +92,9 @@ function cleanupDashboardSessions() {
   for (const [sessionId, session] of dashboardSessions) {
     if (session.expiresAt <= now) dashboardSessions.delete(sessionId);
   }
+  for (const [sessionId, session] of dashboardPasswordSessions) {
+    if (session.expiresAt <= now) dashboardPasswordSessions.delete(sessionId);
+  }
 }
 
 function createDashboardSession(request) {
@@ -101,6 +110,19 @@ function createDashboardSession(request) {
     userAgentHash: userAgentHash(request)
   });
   return { sessionId, csrfToken };
+}
+
+function createDashboardPasswordSession(request) {
+  cleanupDashboardSessions();
+  const sessionId = randomToken(32);
+  const now = Date.now();
+  dashboardPasswordSessions.set(sessionId, {
+    createdAt: now,
+    lastSeenAt: now,
+    expiresAt: now + config.dashboardPasswordSessionTtlMs,
+    userAgentHash: userAgentHash(request)
+  });
+  return { sessionId };
 }
 
 function dashboardSession(request) {
@@ -120,9 +142,55 @@ function dashboardSession(request) {
   return { sessionId, ...session };
 }
 
+function dashboardPasswordSession(request) {
+  if (!passwordAuthEnabled()) return { bypass: true };
+  const sessionId = parseCookies(request.headers.cookie)[dashboardPasswordCookieName] || "";
+  if (!sessionId) return null;
+  const session = dashboardPasswordSessions.get(sessionId);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    dashboardPasswordSessions.delete(sessionId);
+    return null;
+  }
+  if (config.dashboardBindUserAgent && session.userAgentHash !== userAgentHash(request)) {
+    dashboardPasswordSessions.delete(sessionId);
+    return null;
+  }
+  session.lastSeenAt = Date.now();
+  return { sessionId, ...session };
+}
+
 function clearDashboardSession(request) {
   const sessionId = parseCookies(request.headers.cookie)[dashboardSessionCookieName] || "";
   if (sessionId) dashboardSessions.delete(sessionId);
+  const passwordSessionId = parseCookies(request.headers.cookie)[dashboardPasswordCookieName] || "";
+  if (passwordSessionId) dashboardPasswordSessions.delete(passwordSessionId);
+}
+
+function parsePasswordHash(hash) {
+  const [scheme, version, n, r, p, salt, derived] = String(hash || "").split("$");
+  if (scheme !== "scrypt" || version !== "v1" || !salt || !derived) return null;
+  return {
+    n: Number.parseInt(n, 10),
+    r: Number.parseInt(r, 10),
+    p: Number.parseInt(p, 10),
+    salt,
+    derived
+  };
+}
+
+function verifyDashboardPassword(password) {
+  const parsed = parsePasswordHash(config.dashboardPasswordHash);
+  if (!parsed) return false;
+  const expected = Buffer.from(parsed.derived, "base64url");
+  const actual = crypto.scryptSync(String(password || ""), parsed.salt, expected.length, {
+    N: parsed.n,
+    r: parsed.r,
+    p: parsed.p,
+    maxmem: 64 * 1024 * 1024
+  });
+  if (actual.length !== expected.length) return false;
+  return crypto.timingSafeEqual(actual, expected);
 }
 
 function sameOriginAllowed(request) {
@@ -169,7 +237,8 @@ function hasDashboardAccess(request) {
 function isDashboardAsset(requestUrl) {
   const pathname = requestPath(requestUrl);
   return pathname === "/" || pathname === "/dashboard" || pathname === "/dashboard/" ||
-    pathname === "/dashboard/login" || pathname === "/dashboard/logout" ||
+    pathname === "/dashboard/password-login" || pathname === "/dashboard/login" ||
+    pathname === "/dashboard/logout" || pathname === "/dashboard/session" ||
     pathname.startsWith("/dashboard/");
 }
 
@@ -335,14 +404,53 @@ if (config.dashboardEnabled) {
 
   app.get("/dashboard/session", async (request) => {
     const session = dashboardSession(request);
+    const passwordSession = dashboardPasswordSession(request);
     return {
+      passwordRequired: passwordAuthEnabled(),
+      passwordAuthenticated: Boolean(passwordSession),
       authenticated: Boolean(session),
       csrfToken: session ? session.csrfToken : null,
       expiresAt: session ? new Date(session.expiresAt).toISOString() : null
     };
   });
 
+  app.post("/dashboard/password-login", async (request, reply) => {
+    if (!passwordAuthEnabled()) {
+      return { ok: true, passwordRequired: false };
+    }
+    const limit = checkRateLimit(request, "dashboard-password-login", config.dashboardPasswordMax, config.dashboardPasswordWindowMs);
+    if (!limit.allowed) {
+      reply.header("retry-after", String(limit.retryAfterSeconds));
+      reply.code(429).send({ error: "rate_limited", retryAfterSeconds: limit.retryAfterSeconds });
+      return;
+    }
+
+    const schema = z.object({
+      username: z.string().min(1).max(128),
+      password: z.string().min(1).max(512)
+    });
+    const parsed = schema.safeParse(request.body || {});
+    const valid = parsed.success &&
+      parsed.data.username === config.dashboardUsername &&
+      verifyDashboardPassword(parsed.data.password);
+    if (!valid) {
+      reply.code(401).send({ error: "unauthorized" });
+      return;
+    }
+
+    const passwordSession = createDashboardPasswordSession(request);
+    reply.header(
+      "set-cookie",
+      `${dashboardPasswordCookieName}=${encodeURIComponent(passwordSession.sessionId)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(config.dashboardPasswordSessionTtlMs / 1000)}${config.dashboardCookieSecure ? "; Secure" : ""}`
+    );
+    return { ok: true, passwordRequired: true };
+  });
+
   app.post("/dashboard/login", async (request, reply) => {
+    if (!dashboardPasswordSession(request)) {
+      reply.code(403).send({ error: "password_login_required" });
+      return;
+    }
     const limit = checkRateLimit(request, "dashboard-login", config.dashboardLoginMax, config.dashboardLoginWindowMs);
     if (!limit.allowed) {
       reply.header("retry-after", String(limit.retryAfterSeconds));
@@ -370,7 +478,10 @@ if (config.dashboardEnabled) {
       return;
     }
     clearDashboardSession(request);
-    reply.header("set-cookie", `${dashboardSessionCookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${config.dashboardCookieSecure ? "; Secure" : ""}`);
+    reply.header("set-cookie", [
+      `${dashboardSessionCookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${config.dashboardCookieSecure ? "; Secure" : ""}`,
+      `${dashboardPasswordCookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${config.dashboardCookieSecure ? "; Secure" : ""}`
+    ]);
     return { ok: true };
   });
 }

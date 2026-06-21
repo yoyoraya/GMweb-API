@@ -9,8 +9,7 @@ SITE_NAME="${SITE_NAME:-gmweb-api}"
 NGINX_SITE="/etc/nginx/sites-available/$SITE_NAME.conf"
 NGINX_LINK="/etc/nginx/sites-enabled/$SITE_NAME.conf"
 NGINX_MAP="/etc/nginx/conf.d/$SITE_NAME-websocket-map.conf"
-BASIC_AUTH_FILE="/etc/nginx/.${SITE_NAME}.htpasswd"
-BASIC_AUTH_CREDENTIALS="/root/${SITE_NAME}-basic-auth.txt"
+DASHBOARD_CREDENTIALS="/root/${SITE_NAME}-dashboard-login.txt"
 
 usage() {
   cat <<HELP
@@ -76,20 +75,19 @@ install_public_dashboard() {
 
   echo "==> Installing Nginx and Certbot"
   apt-get update
-  apt-get install -y apache2-utils nginx certbot python3-certbot-nginx
+  apt-get install -y nginx certbot python3-certbot-nginx
 
-  echo "==> Creating dashboard Basic Auth"
-  local basic_user="${GMWEB_BASIC_USER:-gmwebadmin}"
-  local basic_pass="${GMWEB_BASIC_PASS:-$(random_password)}"
-  htpasswd -bcB "$BASIC_AUTH_FILE" "$basic_user" "$basic_pass" >/dev/null
-  chmod 640 "$BASIC_AUTH_FILE"
-  chown root:www-data "$BASIC_AUTH_FILE" 2>/dev/null || true
-  cat > "$BASIC_AUTH_CREDENTIALS" <<CREDS
+  echo "==> Creating dashboard login credentials"
+  local dashboard_user="${GMWEB_DASHBOARD_USER:-gmwebadmin}"
+  local dashboard_pass="${GMWEB_DASHBOARD_PASS:-$(random_password)}"
+  local dashboard_hash
+  dashboard_hash="$(node "$APP_DIR/scripts/hash-password.js" "$dashboard_pass")"
+  cat > "$DASHBOARD_CREDENTIALS" <<CREDS
 URL=https://$domain/dashboard
-USERNAME=$basic_user
-PASSWORD=$basic_pass
+USERNAME=$dashboard_user
+PASSWORD=$dashboard_pass
 CREDS
-  chmod 600 "$BASIC_AUTH_CREDENTIALS"
+  chmod 600 "$DASHBOARD_CREDENTIALS"
 
   echo "==> Writing Nginx reverse proxy"
   cat > "$NGINX_MAP" <<'NGINX'
@@ -118,8 +116,18 @@ server {
 
   location = /dashboard/login {
     limit_req zone=gmweb_login burst=5 nodelay;
-    auth_basic "GMweb Dashboard";
-    auth_basic_user_file $BASIC_AUTH_FILE;
+    proxy_pass http://127.0.0.1:$API_PORT;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 3600;
+    proxy_send_timeout 3600;
+  }
+
+  location = /dashboard/password-login {
+    limit_req zone=gmweb_login burst=5 nodelay;
     proxy_pass http://127.0.0.1:$API_PORT;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
@@ -132,8 +140,6 @@ server {
 
   location = /admin/action {
     limit_req zone=gmweb_admin burst=10 nodelay;
-    auth_basic "GMweb Dashboard";
-    auth_basic_user_file $BASIC_AUTH_FILE;
     proxy_pass http://127.0.0.1:$API_PORT;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
@@ -147,8 +153,6 @@ server {
   }
 
   location / {
-    auth_basic "GMweb Dashboard";
-    auth_basic_user_file $BASIC_AUTH_FILE;
     proxy_pass http://127.0.0.1:$API_PORT;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
@@ -180,6 +184,11 @@ NGINX
   echo "==> Securing dashboard cookies and CORS"
   set_env_value HOST "127.0.0.1"
   set_env_value DASHBOARD_ENABLED "true"
+  set_env_value DASHBOARD_USERNAME "$dashboard_user"
+  set_env_value DASHBOARD_PASSWORD_HASH "$dashboard_hash"
+  set_env_value DASHBOARD_PASSWORD_SESSION_TTL_MS "600000"
+  set_env_value DASHBOARD_PASSWORD_WINDOW_MS "900000"
+  set_env_value DASHBOARD_PASSWORD_MAX "5"
   set_env_value DASHBOARD_COOKIE_SECURE "true"
   set_env_value DASHBOARD_BIND_USER_AGENT "true"
   set_env_value CORS_ORIGIN "https://$domain"
@@ -191,9 +200,9 @@ NGINX
   echo "$APP_NAME dashboard is public:"
   echo "  https://$domain/dashboard"
   echo
-  echo "Basic Auth credentials:"
-  echo "  user: $basic_user"
-  echo "  pass: $basic_pass"
+  echo "Dashboard login credentials:"
+  echo "  user: $dashboard_user"
+  echo "  pass: $dashboard_pass"
   echo
   echo "Keep the API token private. You can print it with: gmweb token"
 }
@@ -215,10 +224,10 @@ status_public_dashboard() {
 }
 
 show_credentials() {
-  if [[ -f "$BASIC_AUTH_CREDENTIALS" ]]; then
-    cat "$BASIC_AUTH_CREDENTIALS"
+  if [[ -f "$DASHBOARD_CREDENTIALS" ]]; then
+    cat "$DASHBOARD_CREDENTIALS"
   else
-    echo "No public dashboard credentials file found: $BASIC_AUTH_CREDENTIALS"
+    echo "No dashboard credentials file found: $DASHBOARD_CREDENTIALS"
     return 1
   fi
 }
@@ -227,7 +236,7 @@ remove_public_dashboard() {
   local domain="${1:-}"
 
   echo "==> Removing Nginx public dashboard site"
-  rm -f "$NGINX_LINK" "$NGINX_SITE" "$NGINX_MAP" "$BASIC_AUTH_FILE" "$BASIC_AUTH_CREDENTIALS"
+  rm -f "$NGINX_LINK" "$NGINX_SITE" "$NGINX_MAP" "$DASHBOARD_CREDENTIALS"
   if command -v nginx >/dev/null 2>&1; then
     nginx -t && systemctl reload nginx || true
   fi

@@ -83,8 +83,8 @@ https://dashboard.example.com/dashboard
 ```
 
 The public setup sets `DASHBOARD_COOKIE_SECURE=true` and
-`CORS_ORIGIN=https://dashboard.example.com`. It also enables Nginx Basic Auth as
-a second authentication layer before the dashboard login.
+`CORS_ORIGIN=https://dashboard.example.com`. It also creates a dashboard
+username/password login before the API token step.
 
 ## Rotate API Token
 

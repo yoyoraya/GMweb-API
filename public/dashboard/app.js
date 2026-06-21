@@ -30,6 +30,20 @@ function showApp(unlocked) {
   $("#appPanel").classList.toggle("hidden", !unlocked);
 }
 
+function showPasswordStep() {
+  $("#passwordForm").classList.remove("hidden");
+  $("#loginForm").classList.add("hidden");
+  $("#loginHelp").textContent = "Sign in to continue.";
+  $("#loginError").textContent = "";
+}
+
+function showTokenStep() {
+  $("#passwordForm").classList.add("hidden");
+  $("#loginForm").classList.remove("hidden");
+  $("#loginHelp").textContent = "Enter the API token to unlock the dashboard.";
+  $("#loginError").textContent = "";
+}
+
 function service(overview, name) {
   return (overview.services || []).find((item) => item.name === name) || {};
 }
@@ -87,6 +101,24 @@ async function login(token) {
   await refreshOverview();
 }
 
+async function passwordLogin(username, password) {
+  const response = await fetch("/dashboard/password-login", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    if (response.status === 429) {
+      throw new Error(`Too many attempts. Try again in ${data.retryAfterSeconds || response.headers.get("retry-after") || 60}s.`);
+    }
+    throw new Error("Invalid username or password");
+  }
+  return data;
+}
+
 async function logout() {
   await api("/dashboard/logout", { method: "POST" }).catch(() => {});
   sessionStorage.removeItem("gmwebCsrfToken");
@@ -99,11 +131,19 @@ async function restoreSession() {
   const response = await fetch("/dashboard/session", { credentials: "same-origin" });
   if (!response.ok) return false;
   const session = await response.json();
-  if (!session.authenticated || !session.csrfToken) return false;
-  state.csrfToken = session.csrfToken;
-  sessionStorage.setItem("gmwebCsrfToken", state.csrfToken);
-  showApp(true);
-  await refreshOverview();
+  if (session.authenticated && session.csrfToken) {
+    state.csrfToken = session.csrfToken;
+    sessionStorage.setItem("gmwebCsrfToken", state.csrfToken);
+    showApp(true);
+    await refreshOverview();
+    return true;
+  }
+  showApp(false);
+  if (session.passwordRequired && !session.passwordAuthenticated) {
+    showPasswordStep();
+  } else {
+    showTokenStep();
+  }
   return true;
 }
 
@@ -175,6 +215,17 @@ function openVnc() {
 }
 
 function bind() {
+  $("#passwordForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    $("#loginError").textContent = "";
+    try {
+      await passwordLogin($("#usernameInput").value.trim(), $("#passwordInput").value);
+      $("#passwordInput").value = "";
+      showTokenStep();
+    } catch (error) {
+      $("#loginError").textContent = error.message;
+    }
+  });
   $("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     $("#loginError").textContent = "";
@@ -197,8 +248,14 @@ function bind() {
 
 bind();
 restoreSession().then((ok) => {
-  if (!ok) showApp(false);
-}).catch(() => showApp(false));
+  if (!ok) {
+    showApp(false);
+    showPasswordStep();
+  }
+}).catch(() => {
+  showApp(false);
+  showPasswordStep();
+});
 
 setInterval(() => {
   if (state.csrfToken) refreshOverview().catch(() => {});

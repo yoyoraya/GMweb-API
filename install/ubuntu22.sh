@@ -91,6 +91,9 @@ echo "==> Installing npm dependencies"
 as_app_user "cd '$APP_DIR' && npm ci --omit=dev"
 
 TOKEN="$(as_app_user "cd '$APP_DIR' && node scripts/new-token.js")"
+DASHBOARD_USERNAME="${DASHBOARD_USERNAME:-gmwebadmin}"
+DASHBOARD_PASSWORD="${DASHBOARD_PASSWORD:-$(node -e "console.log(require('node:crypto').randomBytes(33).toString('base64url'))")}"
+DASHBOARD_PASSWORD_HASH="$(as_app_user "cd '$APP_DIR' && node scripts/hash-password.js '$DASHBOARD_PASSWORD'")"
 if [[ ! -f "$APP_DIR/.env" ]]; then
   echo "==> Creating .env"
   cat > "$APP_DIR/.env" <<ENV
@@ -111,6 +114,11 @@ PUBLIC_HEALTH=true
 CORS_ORIGIN=
 DASHBOARD_ENABLED=true
 ADMIN_ACTIONS_ENABLED=true
+DASHBOARD_USERNAME=$DASHBOARD_USERNAME
+DASHBOARD_PASSWORD_HASH=$DASHBOARD_PASSWORD_HASH
+DASHBOARD_PASSWORD_SESSION_TTL_MS=600000
+DASHBOARD_PASSWORD_WINDOW_MS=900000
+DASHBOARD_PASSWORD_MAX=5
 DASHBOARD_COOKIE_SECURE=false
 DASHBOARD_LOGIN_WINDOW_MS=60000
 DASHBOARD_LOGIN_MAX=20
@@ -252,6 +260,8 @@ echo
 echo "==> Installed $APP_NAME"
 echo "App directory: $APP_DIR"
 echo "API token: $(grep '^API_TOKEN=' "$APP_DIR/.env" | sed 's/API_TOKEN=//')"
+echo "Dashboard username: $DASHBOARD_USERNAME"
+echo "Dashboard password: $DASHBOARD_PASSWORD"
 echo
 echo "Manager menu: gmweb"
 echo "Dashboard: http://127.0.0.1:$APP_PORT/dashboard"
