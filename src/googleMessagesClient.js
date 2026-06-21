@@ -310,10 +310,10 @@ class GoogleMessagesClient extends EventEmitter {
           let unreadCount = 0;
           let titleBold = false;
           const badgeEl = node.querySelector?.("mws-badge") ||
-                          node.querySelector?.("[class*='unread']") ||
                           node.querySelector?.("[aria-label*='unread' i]");
           if (badgeEl) {
-            unreadCount = parseInt((badgeEl.innerText || badgeEl.textContent || "").replace(/\D/g, "")) || 0;
+            const raw = (badgeEl.innerText || badgeEl.textContent || "").replace(/\D/g, "");
+            unreadCount = raw.length <= 4 ? (parseInt(raw) || 0) : 0;
           }
           const titleEl = node.querySelector?.("h2");
           if (titleEl) {

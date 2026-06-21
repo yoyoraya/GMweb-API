@@ -245,6 +245,24 @@ async function sendMessage(event) {
   }
 }
 
+function updateConversationsHeader() {
+  const total = newMessageMap.size;
+  const h2 = $("#conversations .panelHead h2");
+  if (!h2) return;
+  const badge = h2.querySelector(".headerBadge");
+  if (total > 0) {
+    if (badge) { badge.textContent = total; }
+    else {
+      const b = document.createElement("span");
+      b.className = "headerBadge";
+      b.textContent = total;
+      h2.appendChild(b);
+    }
+  } else {
+    badge?.remove();
+  }
+}
+
 async function loadConversations(silent = false) {
   const list = $("#conversationList");
   if (!silent) list.replaceChildren(conversationMessage("Loading..."));
@@ -253,10 +271,17 @@ async function loadConversations(silent = false) {
     list.replaceChildren();
     for (const item of data.conversations || []) {
       const id = item.id || item.href;
-      const count = id ? (newMessageMap.get(id) || 0) : 0;
+      const localCount = id ? (newMessageMap.get(id) || 0) : 0;
+      const isUnread = item.unread || localCount > 0;
+
+      // If server says read, clear local badge too
+      if (!item.unread && localCount > 0 && id) {
+        newMessageMap.delete(id);
+        saveNewMessageMap(newMessageMap);
+      }
 
       const row = document.createElement("div");
-      row.className = "conversation";
+      row.className = "conversation" + (isUnread ? " unread" : "");
 
       const titleDiv = document.createElement("div");
       titleDiv.className = "convTitle";
@@ -264,18 +289,6 @@ async function loadConversations(silent = false) {
       const strong = document.createElement("strong");
       strong.textContent = item.title || item.name || "Untitled";
       titleDiv.appendChild(strong);
-
-      const totalUnread = count + (item.unreadCount || 0);
-      const isUnread = item.unread || count > 0;
-
-      if (isUnread) {
-        row.classList.add("unread");
-        const badge = document.createElement("span");
-        badge.className = "newBadge";
-        badge.textContent = totalUnread > 0 ? String(totalUnread) : "new";
-        titleDiv.appendChild(badge);
-      }
-
       row.appendChild(titleDiv);
 
       const ts = document.createElement("small");
@@ -289,7 +302,8 @@ async function loadConversations(silent = false) {
 
       row.addEventListener("click", () => {
         if (id) { newMessageMap.delete(id); saveNewMessageMap(newMessageMap); }
-        row.querySelector(".newBadge")?.remove();
+        row.classList.remove("unread");
+        updateConversationsHeader();
       });
 
       list.appendChild(row);
@@ -297,6 +311,7 @@ async function loadConversations(silent = false) {
     if (!list.children.length) {
       list.replaceChildren(conversationMessage("No conversations"));
     }
+    updateConversationsHeader();
   } catch (error) {
     if (!silent) list.replaceChildren(conversationMessage(error.message));
   }
