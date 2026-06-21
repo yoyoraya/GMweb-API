@@ -180,7 +180,12 @@ class GoogleMessagesClient extends EventEmitter {
     const cached = this.getCachedRecipientConversation(to);
     if (cached?.href) {
       try {
-        await page.goto(new URL(cached.href, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
+        const targetUrl = new URL(cached.href, MESSAGES_URL).toString();
+        if (page.url() === targetUrl) {
+          await this.waitForComposer(3000);
+          return true;
+        }
+        await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
         await this.waitForComposer(8000);
         return true;
       } catch {
@@ -222,7 +227,7 @@ class GoogleMessagesClient extends EventEmitter {
 
     await page.waitForTimeout(500);
     await this.clickRecipientOption(to);
-    await this.waitForComposer(12000);
+    await this.waitForComposer(8000);
   }
 
   async waitForComposer(timeout = 10000) {
@@ -301,6 +306,11 @@ class GoogleMessagesClient extends EventEmitter {
           const snippet = textOf(node.querySelector?.("mws-conversation-snippet"));
           const timestamp = textOf(node.querySelector?.("mws-relative-timestamp"));
           const id = href || text;
+          const badgeEl = node.querySelector?.("mws-badge") || node.querySelector?.("[class*='unread-count']");
+          const badgeText = badgeEl ? (badgeEl.innerText || badgeEl.textContent || "").replace(/\D/g, "") : "";
+          const unreadCount = parseInt(badgeText) || 0;
+          const ariaLabel = node.getAttribute?.("aria-label") || "";
+          const unread = unreadCount > 0 || /\bunread\b/i.test(ariaLabel);
           return {
             id,
             index,
@@ -308,7 +318,9 @@ class GoogleMessagesClient extends EventEmitter {
             title,
             snippet,
             timestamp,
-            text
+            text,
+            unread,
+            unreadCount
           };
         })
         .filter((row) => row.text && row.text.length > 2)
@@ -481,7 +493,7 @@ class GoogleMessagesClient extends EventEmitter {
 
     for (const candidate of candidates) {
       try {
-        await page.getByText(candidate, { exact: false }).first().click({ timeout: 5000 });
+        await page.getByText(candidate, { exact: false }).first().click({ timeout: 2000 });
         return true;
       } catch {
         // Try the next visible recipient label.

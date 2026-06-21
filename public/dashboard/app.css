@@ -383,6 +383,23 @@ label {
   white-space: nowrap;
 }
 
+.unreadDot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.conversation.unread .convTitle strong {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.conversation.unread {
+  border-color: rgba(86, 208, 154, 0.3);
+}
+
 .controlGrid {
   padding: 16px;
   display: grid;

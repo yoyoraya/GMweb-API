@@ -247,6 +247,13 @@ async function loadConversations(silent = false) {
       const titleDiv = document.createElement("div");
       titleDiv.className = "convTitle";
 
+      if (item.unread) {
+        const dot = document.createElement("span");
+        dot.className = "unreadDot";
+        titleDiv.appendChild(dot);
+        row.classList.add("unread");
+      }
+
       const strong = document.createElement("strong");
       strong.textContent = item.title || item.name || "Untitled";
       titleDiv.appendChild(strong);
