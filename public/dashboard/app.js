@@ -6,6 +6,9 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
+const newMessageMap = new Map();
+let sseSource = null;
+
 async function api(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
@@ -71,6 +74,32 @@ function cleanText(value) {
     .trim();
 }
 
+function connectSSE() {
+  if (sseSource) return;
+  sseSource = new EventSource("/events");
+  sseSource.onmessage = (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    if (data.type === "conversation_changed") {
+      const id = data.conversation?.id || data.conversation?.href;
+      if (id) newMessageMap.set(id, (newMessageMap.get(id) || 0) + 1);
+      loadConversations(true);
+    }
+  };
+  sseSource.onerror = () => {
+    sseSource.close();
+    sseSource = null;
+    setTimeout(connectSSE, 5000);
+  };
+}
+
+function disconnectSSE() {
+  if (sseSource) {
+    sseSource.close();
+    sseSource = null;
+  }
+}
+
 async function refreshOverview() {
   const overview = await api("/admin/overview");
   const ready = overview.readiness || {};
@@ -103,6 +132,8 @@ async function login(token) {
   sessionStorage.setItem("gmwebCsrfToken", state.csrfToken);
   showApp(true);
   await refreshOverview();
+  loadConversations();
+  connectSSE();
 }
 
 async function passwordLogin(username, password) {
@@ -125,6 +156,8 @@ async function passwordLogin(username, password) {
 
 async function logout() {
   await api("/dashboard/logout", { method: "POST" }).catch(() => {});
+  disconnectSSE();
+  newMessageMap.clear();
   sessionStorage.removeItem("gmwebCsrfToken");
   state.csrfToken = "";
   $("#vncFrame").src = "about:blank";
@@ -140,6 +173,8 @@ async function restoreSession() {
     sessionStorage.setItem("gmwebCsrfToken", state.csrfToken);
     showApp(true);
     await refreshOverview();
+    loadConversations();
+    connectSSE();
     return true;
   }
   sessionStorage.removeItem("gmwebCsrfToken");
@@ -193,26 +228,56 @@ async function sendMessage(event) {
   }
 }
 
-async function loadConversations() {
+async function loadConversations(silent = false) {
   const list = $("#conversationList");
-  list.replaceChildren(conversationMessage("Loading..."));
+  if (!silent) list.replaceChildren(conversationMessage("Loading..."));
   try {
-    const data = await api("/conversations?limit=12", { headers: { "Content-Type": "text/plain" } });
+    const data = await api("/conversations?limit=50", { headers: { "Content-Type": "text/plain" } });
     list.replaceChildren();
     for (const item of data.conversations || []) {
+      const id = item.id || item.href;
+      const count = id ? (newMessageMap.get(id) || 0) : 0;
+
       const row = document.createElement("div");
       row.className = "conversation";
-      row.innerHTML = "<strong></strong><small></small><small class=\"preview\"></small>";
-      row.querySelector("strong").textContent = item.title || item.name || "Untitled";
-      row.querySelector("small").textContent = item.timestamp || "";
-      row.querySelector(".preview").textContent = item.preview || item.snippet || "";
+
+      const titleDiv = document.createElement("div");
+      titleDiv.className = "convTitle";
+
+      const strong = document.createElement("strong");
+      strong.textContent = item.title || item.name || "Untitled";
+      titleDiv.appendChild(strong);
+
+      if (count > 0) {
+        const badge = document.createElement("span");
+        badge.className = "newBadge";
+        badge.textContent = `${count} new`;
+        titleDiv.appendChild(badge);
+      }
+
+      row.appendChild(titleDiv);
+
+      const ts = document.createElement("small");
+      ts.textContent = item.timestamp || "";
+      row.appendChild(ts);
+
+      const preview = document.createElement("small");
+      preview.className = "preview";
+      preview.textContent = item.preview || item.snippet || "";
+      row.appendChild(preview);
+
+      row.addEventListener("click", () => {
+        if (id) newMessageMap.delete(id);
+        row.querySelector(".newBadge")?.remove();
+      });
+
       list.appendChild(row);
     }
     if (!list.children.length) {
       list.replaceChildren(conversationMessage("No conversations"));
     }
   } catch (error) {
-    list.replaceChildren(conversationMessage(error.message));
+    if (!silent) list.replaceChildren(conversationMessage(error.message));
   }
 }
 
@@ -253,7 +318,10 @@ function bind() {
   $("#logoutBtn").addEventListener("click", logout);
   $("#refreshBtn").addEventListener("click", refreshOverview);
   $("#sendForm").addEventListener("submit", sendMessage);
-  $("#loadConversationsBtn").addEventListener("click", loadConversations);
+  $("#loadConversationsBtn").addEventListener("click", () => {
+    newMessageMap.clear();
+    loadConversations();
+  });
   $("#openVncBtn").addEventListener("click", openVnc);
   $("#reloadVncBtn").addEventListener("click", openVnc);
   $$("[data-action]").forEach((button) => {

@@ -343,17 +343,44 @@ label {
   padding: 12px;
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 6px 12px;
+  gap: 4px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s;
 }
 
-.conversation strong {
+.conversation:hover {
+  border-color: var(--blue);
+}
+
+.convTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  grid-column: 1;
+}
+
+.convTitle strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 
 .conversation small {
   color: var(--muted);
+}
+
+.newBadge {
+  flex-shrink: 0;
+  background: var(--blue);
+  color: var(--ink);
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
 }
 
 .controlGrid {
