@@ -31,6 +31,23 @@ const contentTypes = {
 const rateBuckets = new Map();
 const dashboardSessions = new Map();
 const dashboardPasswordSessions = new Map();
+const sessionsFile = path.join(config.rootDir, "data", "dashboard-sessions.json");
+
+async function loadSessions() {
+  try {
+    const text = await fs.readFile(sessionsFile, "utf8");
+    const saved = JSON.parse(text);
+    const now = Date.now();
+    for (const [id, session] of Object.entries(saved || {})) {
+      if (session.expiresAt > now) dashboardSessions.set(id, session);
+    }
+  } catch { /* first run or missing file */ }
+}
+
+function saveSessions() {
+  const obj = Object.fromEntries(dashboardSessions);
+  fs.writeFile(sessionsFile, JSON.stringify(obj), "utf8").catch(() => {});
+}
 const dummyDashboardPasswordHash = "scrypt$v1$16384$8$1$aHInyzzd-xELadFCqewEOXskJ5E-EUJY$UUWVXTBwmOEPmu1yAIiq1mCAOTKFLv_WmAfqYSRzd8zlOtaUNx3KcADlnh6r5UWxbfoALvpmBxeTF7ELK9hITA";
 
 function corsOrigin(origin, callback) {
@@ -110,6 +127,7 @@ function createDashboardSession(request) {
     expiresAt: now + config.dashboardSessionTtlMs,
     userAgentHash: userAgentHash(request)
   });
+  saveSessions();
   return { sessionId, csrfToken };
 }
 
@@ -166,6 +184,7 @@ function clearDashboardSession(request) {
   if (sessionId) dashboardSessions.delete(sessionId);
   const passwordSessionId = parseCookies(request.headers.cookie)[dashboardPasswordCookieName] || "";
   if (passwordSessionId) dashboardPasswordSessions.delete(passwordSessionId);
+  saveSessions();
 }
 
 function parsePasswordHash(hash) {
@@ -734,6 +753,7 @@ async function main() {
   if (config.appEnv === "production" && !config.apiToken) {
     throw new Error("API_TOKEN is required when NODE_ENV=production.");
   }
+  await loadSessions();
   await app.listen({ host: config.host, port: config.port });
 }
 
