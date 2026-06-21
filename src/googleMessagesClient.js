@@ -306,11 +306,28 @@ class GoogleMessagesClient extends EventEmitter {
           const snippet = textOf(node.querySelector?.("mws-conversation-snippet"));
           const timestamp = textOf(node.querySelector?.("mws-relative-timestamp"));
           const id = href || text;
-          const badgeEl = node.querySelector?.("mws-badge") || node.querySelector?.("[class*='unread-count']");
-          const badgeText = badgeEl ? (badgeEl.innerText || badgeEl.textContent || "").replace(/\D/g, "") : "";
-          const unreadCount = parseInt(badgeText) || 0;
           const ariaLabel = node.getAttribute?.("aria-label") || "";
-          const unread = unreadCount > 0 || /\bunread\b/i.test(ariaLabel);
+          let unreadCount = 0;
+          let titleBold = false;
+          const badgeEl = node.querySelector?.("mws-badge") ||
+                          node.querySelector?.("[class*='unread']") ||
+                          node.querySelector?.("[aria-label*='unread' i]");
+          if (badgeEl) {
+            unreadCount = parseInt((badgeEl.innerText || badgeEl.textContent || "").replace(/\D/g, "")) || 0;
+          }
+          const titleEl = node.querySelector?.("h2");
+          if (titleEl) {
+            try {
+              const fw = parseInt(window.getComputedStyle(titleEl).fontWeight);
+              titleBold = fw >= 600;
+            } catch {}
+          }
+          const snippetBold = (() => {
+            const el = node.querySelector?.("mws-conversation-snippet");
+            if (!el) return false;
+            try { return parseInt(window.getComputedStyle(el).fontWeight) >= 600; } catch { return false; }
+          })();
+          const unread = unreadCount > 0 || /\bunread\b/i.test(ariaLabel) || titleBold || snippetBold;
           return {
             id,
             index,

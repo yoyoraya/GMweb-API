@@ -6,8 +6,16 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
-const newMessageMap = new Map();
 let sseSource = null;
+
+function loadNewMessageMap() {
+  try { return new Map(JSON.parse(localStorage.getItem("gmweb_new_msgs") || "[]")); } catch { return new Map(); }
+}
+function saveNewMessageMap(map) {
+  try { localStorage.setItem("gmweb_new_msgs", JSON.stringify([...map])); } catch {}
+}
+
+const newMessageMap = loadNewMessageMap();
 
 async function api(path, options = {}) {
   const headers = {
@@ -84,8 +92,14 @@ function connectSSE() {
     let data;
     try { data = JSON.parse(e.data); } catch { return; }
     if (data.type === "conversation_changed") {
-      const id = data.conversation?.id || data.conversation?.href;
-      if (id) newMessageMap.set(id, (newMessageMap.get(id) || 0) + 1);
+      const conv = data.conversation || {};
+      const id = conv.id || conv.href;
+      const snippet = String(conv.snippet || conv.text || "").trim();
+      const isIncoming = id && !snippet.startsWith("You:");
+      if (isIncoming) {
+        newMessageMap.set(id, (newMessageMap.get(id) || 0) + 1);
+        saveNewMessageMap(newMessageMap);
+      }
       loadConversations(true);
     }
   };
@@ -247,21 +261,18 @@ async function loadConversations(silent = false) {
       const titleDiv = document.createElement("div");
       titleDiv.className = "convTitle";
 
-      if (item.unread) {
-        const dot = document.createElement("span");
-        dot.className = "unreadDot";
-        titleDiv.appendChild(dot);
-        row.classList.add("unread");
-      }
-
       const strong = document.createElement("strong");
       strong.textContent = item.title || item.name || "Untitled";
       titleDiv.appendChild(strong);
 
-      if (count > 0) {
+      const totalUnread = count + (item.unreadCount || 0);
+      const isUnread = item.unread || count > 0;
+
+      if (isUnread) {
+        row.classList.add("unread");
         const badge = document.createElement("span");
         badge.className = "newBadge";
-        badge.textContent = `${count} new`;
+        badge.textContent = totalUnread > 0 ? String(totalUnread) : "new";
         titleDiv.appendChild(badge);
       }
 
@@ -277,7 +288,7 @@ async function loadConversations(silent = false) {
       row.appendChild(preview);
 
       row.addEventListener("click", () => {
-        if (id) newMessageMap.delete(id);
+        if (id) { newMessageMap.delete(id); saveNewMessageMap(newMessageMap); }
         row.querySelector(".newBadge")?.remove();
       });
 
@@ -330,6 +341,7 @@ function bind() {
   $("#sendForm").addEventListener("submit", sendMessage);
   $("#loadConversationsBtn").addEventListener("click", () => {
     newMessageMap.clear();
+    saveNewMessageMap(newMessageMap);
     loadConversations();
   });
   $("#openVncBtn").addEventListener("click", openVnc);

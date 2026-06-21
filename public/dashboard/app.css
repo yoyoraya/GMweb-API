@@ -374,30 +374,24 @@ label {
 
 .newBadge {
   flex-shrink: 0;
-  background: var(--blue);
+  background: var(--green);
   color: var(--ink);
   font-size: 0.68rem;
   font-weight: 700;
-  padding: 1px 7px;
+  min-width: 20px;
+  padding: 1px 6px;
   border-radius: 999px;
   white-space: nowrap;
-}
-
-.unreadDot {
-  flex-shrink: 0;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--green);
+  text-align: center;
 }
 
 .conversation.unread .convTitle strong {
   font-weight: 700;
-  color: var(--text);
 }
 
 .conversation.unread {
-  border-color: rgba(86, 208, 154, 0.3);
+  border-color: rgba(86, 208, 154, 0.35);
+  background: #151d17;
 }
 
 .controlGrid {
