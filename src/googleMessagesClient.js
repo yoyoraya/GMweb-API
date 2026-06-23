@@ -300,12 +300,11 @@ class GoogleMessagesClient extends EventEmitter {
       await page.keyboard.type(text);
     });
 
-    const sendClicked = await this.clickOptional([
-      "[aria-label^='Send' i]",
-      "button[aria-label*='Send' i]",
-      "text=/^Send$/i"
-    ]);
-    if (!sendClicked) await page.keyboard.press("Enter");
+    // Send instantly. Enter is the native send key in Google Messages, so it fires
+    // the moment the text is in the composer — no waiting on the Send button to
+    // become visible/enabled (which previously cost up to 5s of locator polling).
+    // press() targets the already-focused composer directly.
+    await messageInput.press("Enter");
   }
 
   async listConversations(limit = 20) {
