@@ -1,0 +1,40 @@
+#!/bin/sh
+# Enforce that the API contract (docs/openapi.json) stays in sync whenever the
+# server API surface changes. Installed to .git/hooks/pre-commit by:
+#   git config core.hooksPath scripts/hooks
+# Bypass intentionally with:  git commit --no-verify
+
+staged=$(git diff --cached --name-only)
+echo "$staged" | grep -q '^src/server\.js$' || exit 0
+
+echo "[pre-commit] src/server.js changed — verifying API contract is in sync..."
+
+command -v node >/dev/null 2>&1 || {
+  echo "[pre-commit] node not found; skipping openapi check." >&2
+  exit 0
+}
+
+# Regenerate the spec offline (no running server needed).
+if ! node scripts/generate-openapi.js >/dev/null 2>&1; then
+  echo "[pre-commit] could not run generate:openapi (run 'npm install'?). Skipping check." >&2
+  exit 0
+fi
+
+# If regeneration changed docs/openapi.json vs. what's staged, the contract is stale.
+if ! git diff --quiet -- docs/openapi.json; then
+  echo >&2
+  echo "  X docs/openapi.json is out of date with src/server.js." >&2
+  echo "    The API changed but the committed contract was not refreshed." >&2
+  echo >&2
+  echo "    Fix:" >&2
+  echo "      1) bump \"version\" in package.json (semver; major = breaking)" >&2
+  echo "      2) npm run generate:openapi   (already ran — your tree is now updated)" >&2
+  echo "      3) git add package.json docs/openapi.json" >&2
+  echo "      4) re-commit" >&2
+  echo >&2
+  echo "    (Bypass once with: git commit --no-verify)" >&2
+  exit 1
+fi
+
+echo "[pre-commit] API contract in sync. OK"
+exit 0

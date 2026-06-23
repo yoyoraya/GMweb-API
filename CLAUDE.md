@@ -34,6 +34,11 @@ Two generators exist:
 - `npm run generate:openapi` — offline, builds the spec from code (preferred during dev).
 - `npm run export:openapi` — pulls the spec from a running/remote server (needs `API_TOKEN`).
 
+A **pre-commit hook** enforces this: [scripts/hooks/pre-commit](scripts/hooks/pre-commit)
+regenerates the spec whenever `src/server.js` is staged and blocks the commit if
+`docs/openapi.json` is stale. Enable it once per clone with
+`git config core.hooksPath scripts/hooks`. Bypass deliberately with `git commit --no-verify`.
+
 ## ALWAYS: keep the knowledge graph fresh
 A graphify knowledge graph lives in `graphify-out/`. After making non-trivial
 changes to the codebase, refresh it (re-run `/graphify` on the project) so future
