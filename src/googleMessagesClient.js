@@ -16,6 +16,7 @@ class GoogleMessagesClient extends EventEmitter {
     this.lastConversationFingerprint = new Map();
     this.startedAt = null;
     this.actionLock = Promise.resolve();
+    this.userActionInProgress = false;
     this.conversationCache = this.readConversationCache();
   }
 
@@ -155,79 +156,123 @@ class GoogleMessagesClient extends EventEmitter {
     await page.bringToFront().catch(() => {});
     await this.ensurePaired();
 
-    const openedExisting = await this.openConversationForRecipient(to);
-    if (!openedExisting) {
-      await this.startNewConversation(to);
+    // Priority order — only the last resort reloads the page:
+    //   1. Already on this conversation  → type & send (instant)
+    //   2. Start-chat UI flow            → pure SPA, no reload, any number
+    //   3. Open by URL                   → full page load (slow, fallback)
+    let opened = false;
+    let fastPath = false;
+
+    // 1. Already viewing this recipient's conversation? Skip straight to send.
+    const cached = this.getCachedRecipientConversation(to);
+    if (cached?.href) {
+      const convId = cached.href.split("/").pop();
+      if (convId && page.url().includes(convId) && await this.composerReady(1500)) {
+        opened = true;
+        fastPath = true;
+      }
+    }
+
+    // 2. Start-chat UI flow — click, type the number, confirm. No reload.
+    if (!opened) {
+      opened = await this.startChatFlow(to);
+    }
+
+    // 3. Last resort — navigate by URL (full reload).
+    if (!opened) {
+      opened = await this.openConversationByUrl(to);
+    }
+
+    if (!opened) {
+      const error = new Error(`Could not open a conversation for ${to}.`);
+      error.statusCode = 502;
+      throw error;
     }
 
     await this.typeAndSend(text);
-
     this.cacheRecipientConversation(to, page.url());
 
     const event = {
       type: "sent",
       to,
       text,
-      fastPath: openedExisting,
+      fastPath,
       at: new Date().toISOString()
     };
     this.emit("message:sent", event);
     return event;
   }
 
-  async openConversationForRecipient(to) {
+  // Resolves true once the message composer/input is present in the DOM
+  // (i.e. a conversation is open and ready to type into).
+  async composerReady(timeout = 2000) {
     const page = await this.ensurePage();
-    const cached = this.getCachedRecipientConversation(to);
-    if (cached?.href) {
-      try {
-        const targetUrl = new URL(cached.href, MESSAGES_URL).toString();
-        if (page.url() === targetUrl) {
-          await this.waitForComposer(3000);
-          return true;
-        }
-        await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-        await this.waitForComposer(8000);
-        return true;
-      } catch {
-        this.deleteCachedRecipientConversation(to);
-      }
+    try {
+      await page.waitForFunction(() => {
+        return !!document.querySelector(
+          "[aria-label*='Text message' i], [aria-label*='Message' i], textarea, [contenteditable='true']"
+        );
+      }, null, { timeout });
+      return true;
+    } catch {
+      return false;
     }
-
-    const conversations = await this.listConversationsUnlocked(80);
-    const match = conversations.find((conversation) => this.conversationMatchesRecipient(conversation, to));
-    if (!match?.href) return false;
-
-    await page.goto(new URL(match.href, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
-    await this.waitForComposer(10000);
-    this.cacheRecipientConversation(to, match.href, match.title);
-    return true;
   }
 
-  async startNewConversation(to) {
+  // Open a conversation purely through the "Start chat" UI — no page reload.
+  // Works for ANY number regardless of whether it is visible in the sidebar.
+  async startChatFlow(to) {
     const page = await this.ensurePage();
-    await page.goto(`${MESSAGES_URL}/conversations`, { waitUntil: "domcontentloaded" }).catch(() => {});
+    try {
+      // The Start-chat FAB is reachable from anywhere in the app (sidebar).
+      await this.clickFirst([
+        "[aria-label*='Start chat' i]",
+        "[aria-label*='Start conversation' i]",
+        "mws-fab",
+        "text=/Start chat/i",
+        "text=/New conversation/i"
+      ], "start chat");
 
-    await this.clickFirst([
-      "[aria-label*='Start chat' i]",
-      "[aria-label*='Start conversation' i]",
-      "text=/Start chat/i",
-      "text=/New conversation/i",
-      "mws-fab"
-    ], "start chat");
+      const recipientInput = await this.locatorFirst([
+        "input[placeholder*='name' i]",
+        "input[placeholder*='phone' i]",
+        "input[aria-label*='recipient' i]",
+        "input[aria-label*='to' i]",
+        "input[type='tel']",
+        "input[type='text']"
+      ]);
+      await recipientInput.fill(to);
 
-    const recipientInput = await this.locatorFirst([
-      "input[placeholder*='name' i]",
-      "input[placeholder*='phone' i]",
-      "input[aria-label*='recipient' i]",
-      "input[aria-label*='to' i]",
-      "input[type='text']"
-    ]);
-    await recipientInput.fill(to);
-    await page.keyboard.press("Enter");
+      // Let the "Send to <number>" suggestion render, then confirm it.
+      await page.waitForTimeout(300);
+      await this.clickRecipientOption(to);
 
-    await page.waitForTimeout(500);
-    await this.clickRecipientOption(to);
-    await this.waitForComposer(8000);
+      return await this.composerReady(8000);
+    } catch {
+      return false;
+    }
+  }
+
+  // Last resort: navigate to the conversation by URL (full page reload).
+  // Uses the cached href, otherwise scans the conversation list once.
+  async openConversationByUrl(to) {
+    const page = await this.ensurePage();
+    let href = this.getCachedRecipientConversation(to)?.href || null;
+    if (!href) {
+      const conversations = await this.listConversationsUnlocked(80);
+      const match = conversations.find((c) => this.conversationMatchesRecipient(c, to));
+      href = match?.href || null;
+    }
+    if (!href) return false;
+    try {
+      await page.goto(new URL(href, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
+      const ready = await this.composerReady(10000);
+      if (ready) this.cacheRecipientConversation(to, href);
+      return ready;
+    } catch {
+      this.deleteCachedRecipientConversation(to);
+      return false;
+    }
   }
 
   async waitForComposer(timeout = 10000) {
@@ -267,6 +312,55 @@ class GoogleMessagesClient extends EventEmitter {
     return this.withBrowserLock(() => this.listConversationsUnlocked(limit));
   }
 
+  // The GM web sidebar lazy-loads conversations on scroll. Scroll the list
+  // container down until we have `target` items rendered or no more load in.
+  // Cheap when enough items are already present (the loop exits immediately).
+  async loadConversationListItems(page, target) {
+    await page.evaluate(async (want) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const countItems = () => document.querySelectorAll(
+        "mws-conversation-list-item, a[href*='/web/conversations/']"
+      ).length;
+
+      // Find the scrollable ancestor that actually holds the conversation list.
+      const findScroller = () => {
+        const item = document.querySelector("mws-conversation-list-item, a[href*='/web/conversations/']");
+        let node = item?.parentElement;
+        while (node && node !== document.body) {
+          const style = getComputedStyle(node);
+          if ((style.overflowY === "auto" || style.overflowY === "scroll") &&
+              node.scrollHeight > node.clientHeight + 4) {
+            return node;
+          }
+          node = node.parentElement;
+        }
+        return null;
+      };
+
+      const scroller = findScroller();
+      if (!scroller) return;
+
+      let last = -1;
+      let stalls = 0;
+      // High iteration cap supports hundreds of conversations; the loop exits
+      // early as soon as the list stops growing (with a small tolerance for
+      // lazy-load lag).
+      for (let i = 0; i < 250; i++) {
+        if (countItems() >= want) break;
+        scroller.scrollTop = scroller.scrollHeight;
+        await sleep(300);
+        const now = countItems();
+        if (now === last) {
+          if (++stalls >= 2) break; // two no-growth cycles → reached the end
+        } else {
+          stalls = 0;
+          last = now;
+        }
+      }
+      scroller.scrollTop = 0; // restore the list to the top
+    }, target).catch(() => {});
+  }
+
   async listConversationsUnlocked(limit = 20) {
     const page = await this.ensurePage();
     if (!/\/web\/conversations/.test(page.url())) {
@@ -281,7 +375,13 @@ class GoogleMessagesClient extends EventEmitter {
         const text = (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
         return text.length > 2 && !/^Start chat$/i.test(text);
       });
-    }, null, { timeout: 15000 }).catch(() => {});
+    }, null, { timeout: 5000 }).catch(() => {});
+
+    // Lazy-load more rows only when the caller wants a large list (dashboard,
+    // recipient lookup). Polling (small limit) skips this to stay fast.
+    if (limit > 15) {
+      await this.loadConversationListItems(page, limit);
+    }
 
     const rows = await page.evaluate((maxRows) => {
       const textOf = (node) => (node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
@@ -411,6 +511,25 @@ class GoogleMessagesClient extends EventEmitter {
     const page = await this.ensurePage();
     await this.ensurePaired();
 
+    const hrefToOpen = query.href || null;
+
+    if (hrefToOpen) {
+      // Already on this conversation? Nothing to do.
+      const convId = hrefToOpen.split("/").pop();
+      if (page.url().includes(convId)) {
+        return { opened: true, conversation: { href: hrefToOpen, id: hrefToOpen, title: query.title || "" } };
+      }
+
+      // Prefer SPA click (fast) over full page navigation (slow)
+      const clicked = await this.clickConversationInSidebar(page, hrefToOpen);
+      if (!clicked) {
+        // Sidebar link not visible — fall back to full navigation
+        await page.goto(new URL(hrefToOpen, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
+        await page.waitForLoadState("domcontentloaded").catch(() => {});
+      }
+      return { opened: true, conversation: { href: hrefToOpen, id: hrefToOpen, title: query.title || "" } };
+    }
+
     const conversations = await this.listConversationsUnlocked(100);
     const match = this.findConversation(conversations, query);
     if (!match) {
@@ -421,16 +540,37 @@ class GoogleMessagesClient extends EventEmitter {
     }
 
     if (match.href) {
-      await page.goto(new URL(match.href, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
+      const clicked = await this.clickConversationInSidebar(page, match.href);
+      if (!clicked) {
+        await page.goto(new URL(match.href, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
+        await page.waitForLoadState("domcontentloaded").catch(() => {});
+      }
     } else {
       await page.getByText(match.title || match.text, { exact: false }).first().click();
     }
 
-    await page.waitForLoadState("domcontentloaded").catch(() => {});
-    return {
-      opened: true,
-      conversation: match
-    };
+    return { opened: true, conversation: match };
+  }
+
+  async clickConversationInSidebar(page, href) {
+    const convId = href.split("/").pop();
+    try {
+      const link = page.locator(`a[href*="${convId}"]`).first();
+      const visible = await link.isVisible({ timeout: 1500 });
+      if (!visible) return false;
+      await link.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async waitForMessages(timeout = 8000) {
+    const page = await this.ensurePage();
+    await page.waitForFunction(
+      () => document.querySelector("mws-text-message-part, mws-tombstone-message-wrapper"),
+      null, { timeout }
+    ).catch(() => {});
   }
 
   findConversation(conversations, query) {
@@ -506,6 +646,8 @@ class GoogleMessagesClient extends EventEmitter {
   async clickRecipientOption(to) {
     const page = await this.ensurePage();
     const normalizedLocal = to.replace(/^\+98/, "0");
+    // "Send to <number>" is the canonical suggestion and usually appears first;
+    // short per-candidate timeouts keep this snappy when it doesn't match.
     const candidates = [
       `Send to ${to}`,
       to,
@@ -514,7 +656,7 @@ class GoogleMessagesClient extends EventEmitter {
 
     for (const candidate of candidates) {
       try {
-        await page.getByText(candidate, { exact: false }).first().click({ timeout: 2000 });
+        await page.getByText(candidate, { exact: false }).first().click({ timeout: 1200 });
         return true;
       } catch {
         // Try the next visible recipient label.
@@ -525,45 +667,33 @@ class GoogleMessagesClient extends EventEmitter {
     return false;
   }
 
-  async getActiveConversationMessages(limit = 50) {
-    return this.withBrowserLock(() => this.getActiveConversationMessagesUnlocked(limit));
-  }
-
-  async getActiveConversationMessagesUnlocked(limit = 50) {
-    const page = await this.ensurePage();
+  async extractMessagesFromPage(page, limit) {
     await page.waitForFunction(() => {
       const body = document.body.innerText || "";
       const loaded = !/Loading messages/i.test(body);
       return loaded && document.querySelector("mws-text-message-part, mws-tombstone-message-wrapper");
-    }, null, { timeout: 20000 }).catch(() => {});
+    }, null, { timeout: 8000 }).catch(() => {});
 
     return page.evaluate((maxRows) => {
       const directCandidates = [
         ...document.querySelectorAll("mws-text-message-part"),
         ...document.querySelectorAll("mws-tombstone-message-wrapper")
       ];
-
       const fallbackCandidates = [...document.querySelectorAll("body *")]
         .filter((node) => {
           const rect = node.getBoundingClientRect();
-          return rect.left > 340
-            && rect.top > 130
-            && rect.top < window.innerHeight - 80
-            && rect.width > 8
-            && rect.width < 850
-            && rect.height > 8
-            && rect.height < 180;
+          return rect.left > 340 && rect.top > 130 && rect.top < window.innerHeight - 80
+            && rect.width > 8 && rect.width < 850 && rect.height > 8 && rect.height < 180;
         });
-
       const candidates = directCandidates.length ? directCandidates : fallbackCandidates;
-
       return candidates
         .map((node, index) => {
           const rect = node.getBoundingClientRect();
           const tag = node.tagName.toLowerCase();
           const aria = node.getAttribute("aria-label") || "";
           const type = tag === "mws-tombstone-message-wrapper" ? "timestamp" : "message";
-          const direction = aria.startsWith("You said:") ? "out" : aria.includes(" said:") ? "in" : "";
+          const dirFromAria = aria.startsWith("You said:") ? "out" : aria.includes(" said:") ? "in" : "";
+          const direction = dirFromAria || (type !== "timestamp" ? (Math.round(rect.left) > 720 ? "out" : "in") : "");
           return {
             index,
             type,
@@ -580,21 +710,32 @@ class GoogleMessagesClient extends EventEmitter {
         .filter((row) => !/^\d+$/.test(row.text))
         .filter((row) => !/^0 new messages$/i.test(row.text))
         .sort((a, b) => a.y - b.y || a.x - b.x)
-        .filter((row, index, rows) => rows.findIndex((other) => other.text === row.text && Math.abs(other.y - row.y) < 4) === index)
+        .filter((row, idx, rows) => rows.findIndex((other) => other.text === row.text && Math.abs(other.y - row.y) < 4) === idx)
         .map(({ index, type, direction, text, aria }) => ({ index, type, direction, text, aria }))
         .slice(-maxRows);
     }, limit);
   }
 
+  async getActiveConversationMessages(limit = 50) {
+    return this.withBrowserLock(() => this.getActiveConversationMessagesUnlocked(limit));
+  }
+
+  async getActiveConversationMessagesUnlocked(limit = 50) {
+    const page = await this.ensurePage();
+    return this.extractMessagesFromPage(page, limit);
+  }
+
   async getConversationMessages(query, limit = 50) {
-    return this.withBrowserLock(async () => {
-      const opened = await this.openConversationUnlocked(query);
-      const messages = await this.getActiveConversationMessagesUnlocked(limit);
-      return {
-        conversation: opened.conversation,
-        messages
-      };
-    });
+    this.userActionInProgress = true;
+    try {
+      return await this.withBrowserLock(async () => {
+        const opened = await this.openConversationUnlocked(query);
+        const messages = await this.getActiveConversationMessagesUnlocked(limit);
+        return { conversation: opened.conversation, messages };
+      });
+    } finally {
+      this.userActionInProgress = false;
+    }
   }
 
   async debugSidebarElements(limit = 80) {
@@ -672,9 +813,11 @@ class GoogleMessagesClient extends EventEmitter {
 
   async pollConversations() {
     if (!this.page || this.page.isClosed()) return;
+    if (this.userActionInProgress) return; // user action has priority — skip this cycle
     await this.withBrowserLock(async () => {
+      if (this.userActionInProgress) return; // re-check after acquiring lock
       const status = await this.statusUnlocked();
-      if (!status.paired) return;
+      if (!status.paired || this.userActionInProgress) return;
 
       const conversations = await this.listConversationsUnlocked(10);
       for (const conversation of conversations) {

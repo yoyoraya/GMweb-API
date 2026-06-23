@@ -269,6 +269,12 @@ label {
   align-items: start;
 }
 
+.fullColumn {
+  display: grid;
+  gap: 18px;
+  grid-column: 1 / -1;
+}
+
 .leftColumn,
 .rightColumn {
   display: grid;
@@ -317,6 +323,9 @@ label {
   padding: 5px 10px;
   font-size: 12px;
   color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .pill.ok {
@@ -327,6 +336,22 @@ label {
 .pill.bad,
 .errorText {
   color: var(--red);
+}
+
+.pill.loading::after {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--line);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .conversationList {
@@ -372,6 +397,14 @@ label {
   color: var(--muted);
 }
 
+.conversation .preview {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  display: block;
+}
+
 .headerBadge {
   display: inline-flex;
   align-items: center;
@@ -401,32 +434,47 @@ label {
   padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 420px;
+  gap: 2px;
+  max-height: 480px;
   overflow-y: auto;
 }
 
 .msg {
   max-width: 78%;
   padding: 8px 12px;
-  border-radius: 14px;
+  border-radius: 18px;
   font-size: 14px;
   line-height: 1.45;
   word-break: break-word;
 }
 
+/* Group spacing: new group or timestamp gets extra top margin */
+.msg[data-group="first"],
+.msg[data-group="single"],
+.msg.ts {
+  margin-top: 6px;
+}
+
+/* Outgoing (right side) */
 .msg.out {
   align-self: flex-end;
   background: var(--blue);
   color: var(--ink);
-  border-bottom-right-radius: 4px;
 }
 
+.msg.out[data-group="first"]  { border-bottom-right-radius: 5px; }
+.msg.out[data-group="mid"]    { border-top-right-radius: 5px; border-bottom-right-radius: 5px; }
+.msg.out[data-group="last"]   { border-top-right-radius: 5px; }
+
+/* Incoming (left side) */
 .msg.in {
   align-self: flex-start;
   background: var(--panel-2);
-  border-bottom-left-radius: 4px;
 }
+
+.msg.in[data-group="first"]  { border-bottom-left-radius: 5px; }
+.msg.in[data-group="mid"]    { border-top-left-radius: 5px; border-bottom-left-radius: 5px; }
+.msg.in[data-group="last"]   { border-top-left-radius: 5px; }
 
 .msg.ts {
   align-self: center;
@@ -434,6 +482,31 @@ label {
   color: var(--muted);
   font-size: 11px;
   padding: 2px 0;
+}
+
+.msg.skeleton {
+  min-height: 36px;
+  background: var(--panel-2);
+  color: transparent;
+  pointer-events: none;
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.msg.skeleton.out { align-self: flex-end; }
+.msg.skeleton.in  { align-self: flex-start; }
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.5; }
+  50%       { opacity: 0.2; }
+}
+
+@keyframes msgFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.messageList > .msg:not(.skeleton) {
+  animation: msgFadeIn 0.18s ease;
 }
 
 .pinIcon {
@@ -460,6 +533,104 @@ label {
   min-height: 20px;
   margin-top: 12px;
 }
+
+.keyForm {
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tokenBanner {
+  padding: 14px 16px;
+  background: rgba(86, 208, 154, 0.08);
+  border-bottom: 1px solid rgba(86, 208, 154, 0.3);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.tokenBanner code {
+  font-family: monospace;
+  background: var(--panel-2);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+
+.apiKeyList {
+  display: grid;
+  gap: 0;
+}
+
+.apiKeyRow {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 12px;
+  align-items: start;
+}
+
+.apiKeyRow:last-child { border-bottom: 0; }
+
+.apiKeyRow.disabled { opacity: 0.5; }
+
+.apiKeyMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.apiKeyActions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: flex-start;
+}
+
+.ipTag {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+.apiLogList {
+  max-height: 380px;
+  overflow-y: auto;
+  display: grid;
+  gap: 0;
+}
+
+.logRow {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  display: grid;
+  grid-template-columns: 130px 120px 60px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  font-family: monospace;
+}
+
+.logRow:last-child { border-bottom: 0; }
+
+.logRow .logMethod { color: var(--blue); }
+.logRow .logPath   { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logRow .logKey    { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logRow .logIp     { color: var(--muted); font-size: 11px; }
 
 @media (max-width: 1100px) {
   .metricGrid {

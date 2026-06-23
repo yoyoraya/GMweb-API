@@ -51,6 +51,7 @@
           <a href="#overview" class="active">Overview</a>
           <a href="#send">Send</a>
           <a href="#conversations">Conversations</a>
+          <a href="#apikeys">API Keys</a>
           <a href="#vnc">VNC</a>
           <a href="#controls">Controls</a>
         </nav>
@@ -95,6 +96,37 @@
               <small>proxied through /vnc</small>
             </article>
           </section>
+
+          <div id="apikeys" class="fullColumn hidden">
+              <section class="panel">
+                <div class="panelHead">
+                  <h2>API Keys</h2>
+                  <button id="createKeyBtn" class="primary">+ New Key</button>
+                </div>
+                <form id="createKeyForm" class="keyForm hidden">
+                  <label>Project name<input id="keyNameInput" type="text" placeholder="My Project" maxlength="64"></label>
+                  <label>Allowed IPs <span style="font-weight:400;font-size:12px">(comma-separated, leave empty = any IP)</span>
+                    <input id="keyIpsInput" type="text" placeholder="1.2.3.4, 5.6.7.8"></label>
+                  <div style="display:flex;gap:10px">
+                    <button type="submit" class="primary">Create</button>
+                    <button type="button" id="cancelKeyBtn" class="secondary">Cancel</button>
+                  </div>
+                </form>
+                <div id="newTokenBanner" class="tokenBanner hidden">
+                  <strong>Token (copy now — shown once):</strong>
+                  <code id="newTokenValue"></code>
+                  <button id="copyTokenBtn" class="secondary">Copy</button>
+                </div>
+                <div id="apiKeyList" class="apiKeyList"></div>
+              </section>
+              <section class="panel">
+                <div class="panelHead">
+                  <h2>API Request Log</h2>
+                  <button id="refreshLogsBtn" class="secondary">Refresh</button>
+                </div>
+                <div id="apiLogList" class="apiLogList"></div>
+              </section>
+            </div>
 
           <section class="workspace">
             <div class="leftColumn">

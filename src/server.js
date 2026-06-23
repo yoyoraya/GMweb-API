@@ -1,6 +1,8 @@
 const Fastify = require("fastify");
 const cors = require("@fastify/cors");
 const proxy = require("@fastify/http-proxy");
+const swagger = require("@fastify/swagger");
+const swaggerUi = require("@fastify/swagger-ui");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -8,6 +10,8 @@ const { execFile, spawn } = require("node:child_process");
 const { z } = require("zod");
 const config = require("./config");
 const { GoogleMessagesClient } = require("./googleMessagesClient");
+const { ApiKeyStore } = require("./apiKeys");
+const { SendQueue } = require("./queue");
 const pkg = require("../package.json");
 
 const app = Fastify({
@@ -17,6 +21,11 @@ const app = Fastify({
 
 const client = new GoogleMessagesClient(config);
 const sseClients = new Set();
+const apiKeyStore = new ApiKeyStore(
+  path.join(config.rootDir, "data", "api-keys.json"),
+  path.join(config.rootDir, "data", "api-requests.jsonl")
+);
+const sendQueue = new SendQueue();
 const dashboardSessionCookieName = "gmweb_session";
 const dashboardPasswordCookieName = "gmweb_login";
 const dashboardDir = path.join(config.rootDir, "public", "dashboard");
@@ -268,6 +277,42 @@ function isDashboardAsset(requestUrl) {
     pathname.startsWith("/dashboard/");
 }
 
+// Routes only accessible by master token or dashboard session (not project keys)
+const ADMIN_ONLY_PREFIXES = ["/admin/", "/browser/", "/session/", "/dashboard/", "/vnc", "/docs"];
+
+function isAdminOnlyPath(url) {
+  const p = requestPath(url);
+  return ADMIN_ONLY_PREFIXES.some((prefix) => p.startsWith(prefix));
+}
+
+// Brute-force protection: track auth failures per IP
+const authFailBuckets = new Map();
+const AUTH_FAIL_MAX = 20;        // max failed auth attempts
+const AUTH_FAIL_WINDOW = 600_000; // per 10 minutes
+const AUTH_BLOCK_DURATION = 1800_000; // 30-minute block after repeated failures
+
+function isAuthBlocked(ip) {
+  const bucket = authFailBuckets.get(ip);
+  if (!bucket) return false;
+  const now = Date.now();
+  if (bucket.blockedUntil && now < bucket.blockedUntil) return true;
+  // Reset expired window
+  bucket.attempts = bucket.attempts.filter((ts) => now - ts < AUTH_FAIL_WINDOW);
+  if (bucket.attempts.length >= AUTH_FAIL_MAX) {
+    bucket.blockedUntil = now + AUTH_BLOCK_DURATION;
+    bucket.attempts = [];
+    return true;
+  }
+  return false;
+}
+
+function recordAuthFailure(ip) {
+  const now = Date.now();
+  let bucket = authFailBuckets.get(ip);
+  if (!bucket) { bucket = { attempts: [], blockedUntil: 0 }; authFailBuckets.set(ip, bucket); }
+  bucket.attempts.push(now);
+}
+
 function requireToken(request, reply, done) {
   if (config.publicHealth && request.url === "/health") return done();
   if (config.dashboardEnabled && isDashboardAsset(request.url)) return done();
@@ -277,16 +322,61 @@ function requireToken(request, reply, done) {
     return;
   }
   if (!config.apiToken) return done();
-  if (bearerToken(request) === config.apiToken) return done();
 
+  const ip = request.ip || "";
+
+  // Brute-force block check
+  if (isAuthBlocked(ip)) {
+    reply.code(429).send({ error: "too_many_auth_failures", retryAfterSeconds: Math.ceil(AUTH_BLOCK_DURATION / 1000) });
+    return;
+  }
+
+  // Master token — full access (constant-time compare)
+  const token = bearerToken(request);
+  if (token) {
+    const masterHash = crypto.createHash("sha256").update(config.apiToken).digest();
+    const tokenHash  = crypto.createHash("sha256").update(token).digest();
+    if (masterHash.length === tokenHash.length && crypto.timingSafeEqual(masterHash, tokenHash)) {
+      return done();
+    }
+  }
+
+  // Dashboard session — full access
   const session = dashboardSession(request);
   if (session && csrfAllowed(request, session)) return done();
-
   if (session) {
     reply.code(403).send({ error: "csrf_failed" });
-  } else {
-    reply.code(401).send({ error: "unauthorized" });
+    return;
   }
+
+  // Project API key — only for non-admin paths
+  if (!isAdminOnlyPath(request.url) && token) {
+    const key = apiKeyStore.findByToken(token);
+    if (key) {
+      if (!apiKeyStore.isIpAllowed(key, ip)) {
+        recordAuthFailure(ip); // wrong IP for a valid-format token
+        reply.code(403).send({ error: "ip_not_allowed", ip });
+        return;
+      }
+      request._projectKey = key;
+      apiKeyStore.recordUse(key.id);
+      apiKeyStore.appendLog({
+        ts: new Date().toISOString(),
+        keyId: key.id,
+        keyName: key.name,
+        ip,
+        method: request.method,
+        path: requestPath(request.url),
+        count: key.requestCount
+      }).catch(() => {});
+      return done();
+    }
+  }
+
+  // Only count as brute-force when a token was actually provided but wrong.
+  // Missing auth (browser hitting /docs assets, dashboard session expired) is NOT brute force.
+  if (token) recordAuthFailure(ip);
+  reply.code(401).send({ error: "unauthorized" });
 }
 
 function emitSse(event) {
@@ -313,11 +403,208 @@ client.on("conversation:changed", (event) => {
   emitSse(event);
   postWebhook(event);
 });
-client.on("message:sent", (event) => {
-  emitSse(event);
-  postWebhook(event);
-});
+// Note: message send lifecycle SSE/webhooks are emitted by the queue worker
+// (with jobId), so we no longer mirror client's internal "message:sent" here.
 client.on("error", (error) => app.log.warn({ error }, "client error"));
+
+// Queue worker: processes one send at a time using the shared browser.
+function startSendWorker() {
+  sendQueue.startWorker(
+    async (job) => {
+      // Runs in-process; shares the single Playwright browser via withBrowserLock.
+      return client.sendMessage({ to: job.data.to, text: job.data.text });
+    },
+    {
+      onActive: (job) => emitSse({
+        type: "send_processing",
+        jobId: job.id,
+        to: job.data?.to,
+        at: new Date().toISOString()
+      }),
+      onCompleted: (job, result) => {
+        const event = {
+          type: "send_completed",
+          jobId: job.id,
+          to: job.data?.to,
+          text: job.data?.text,
+          fastPath: result?.fastPath,
+          at: result?.at || new Date().toISOString()
+        };
+        emitSse(event);
+        postWebhook(event);
+      },
+      onFailed: (job, err) => {
+        const attemptsMade = job?.attemptsMade || 0;
+        const maxAttempts = job?.opts?.attempts || 1;
+        const event = {
+          type: "send_failed",
+          jobId: job?.id,
+          to: job?.data?.to,
+          error: err?.message || "send failed",
+          attemptsMade,
+          willRetry: attemptsMade < maxAttempts,
+          at: new Date().toISOString()
+        };
+        emitSse(event);
+        postWebhook(event);
+      },
+      onError: (err) => app.log.warn({ err }, "send worker error")
+    }
+  );
+}
+
+app.register(swagger, {
+  openapi: {
+    openapi: "3.0.3",
+    info: {
+      title: "GMweb API",
+      description: [
+        "Google Messages SMS/RCS gateway — control Google Messages Web via a REST API.",
+        "",
+        "## Authentication",
+        "All endpoints (except `/health`) require a Bearer token in the `Authorization` header.",
+        "",
+        "Two token types are accepted:",
+        "- **Master token** (`API_TOKEN` env var) — full access to all endpoints including admin and key management.",
+        "- **Project API key** (`gmw_...`) — access to messaging & conversation endpoints only. Admin routes return 401.",
+        "",
+        "```",
+        "Authorization: Bearer gmw_your_project_token",
+        "```",
+        "",
+        "## Rate Limits",
+        "Project keys have configurable per-minute and per-hour send limits.",
+        "Repeated auth failures from an IP trigger a 30-minute block."
+      ].join("\n"),
+      version: pkg.version,
+      contact: { name: "GMweb API" }
+    },
+    servers: [{ url: "/", description: "This server" }],
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "gmw_... or master API_TOKEN",
+          description: "Pass your API token. Project keys start with `gmw_`. Master key is the API_TOKEN env var."
+        }
+      },
+      schemas: {
+        Error: {
+          type: "object",
+          properties: {
+            error: { type: "string", description: "Machine-readable error code" },
+            message: { type: "string", description: "Human-readable description" }
+          }
+        },
+        Message: {
+          type: "object",
+          properties: {
+            index: { type: "integer" },
+            type: { type: "string", enum: ["message", "timestamp"] },
+            direction: { type: "string", enum: ["in", "out"] },
+            text: { type: "string" },
+            aria: { type: "string" }
+          }
+        },
+        Conversation: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            href: { type: "string", description: "Stable conversation path (use as identifier)" },
+            title: { type: "string", description: "Contact name" },
+            snippet: { type: "string", description: "Last message preview" },
+            timestamp: { type: "string" },
+            unread: { type: "boolean" },
+            unreadCount: { type: "integer" },
+            pinned: { type: "boolean" }
+          }
+        },
+        ApiKey: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Key ID (hex)" },
+            name: { type: "string" },
+            allowedIps: { type: "array", items: { type: "string" }, description: "Allowed source IPs. Empty = any IP." },
+            sendRateMinute: { type: "integer", description: "Max /send calls per minute (0 = unlimited)" },
+            sendRateHour: { type: "integer", description: "Max /send calls per hour (0 = unlimited)" },
+            createdAt: { type: "string", format: "date-time" },
+            lastUsedAt: { type: "string", format: "date-time", nullable: true },
+            requestCount: { type: "integer" },
+            enabled: { type: "boolean" },
+            tokenPreview: { type: "string", description: "First 8 chars of token for identification" }
+          }
+        }
+      }
+    },
+    security: [{ bearerAuth: [] }],
+    tags: [
+      { name: "Messaging", description: "Send messages" },
+      { name: "Conversations", description: "Browse and read conversation history" },
+      { name: "Session", description: "Browser session and pairing status" },
+      { name: "Admin", description: "Service administration — master token only" },
+      { name: "API Keys", description: "Manage project API keys — master token only" }
+    ]
+  }
+});
+
+app.register(swaggerUi, {
+  routePrefix: "/docs",
+  uiConfig: {
+    docExpansion: "list",
+    deepLinking: true,
+    displayRequestDuration: true,
+    persistAuthorization: true,
+    filter: true
+  },
+  staticCSP: false,
+  transformStaticCSP: (header) => header
+});
+
+// Register reusable schemas for Fastify serialization and OpenAPI $ref
+app.addSchema({
+  $id: "Message",
+  type: "object",
+  properties: {
+    index: { type: "integer" },
+    type: { type: "string", enum: ["message", "timestamp"] },
+    direction: { type: "string", enum: ["in", "out"] },
+    text: { type: "string" },
+    aria: { type: "string" }
+  }
+});
+
+app.addSchema({
+  $id: "Conversation",
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    href: { type: "string" },
+    title: { type: "string" },
+    snippet: { type: "string" },
+    timestamp: { type: "string" },
+    unread: { type: "boolean" },
+    unreadCount: { type: "integer" },
+    pinned: { type: "boolean" }
+  }
+});
+
+app.addSchema({
+  $id: "ApiKey",
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    allowedIps: { type: "array", items: { type: "string" } },
+    sendRateMinute: { type: "integer" },
+    sendRateHour: { type: "integer" },
+    createdAt: { type: "string" },
+    lastUsedAt: { type: ["string", "null"] },
+    requestCount: { type: "integer" },
+    enabled: { type: "boolean" },
+    tokenPreview: { type: "string" }
+  }
+});
 
 app.register(cors, { origin: corsOrigin });
 app.addHook("onRequest", applySecurityHeaders);
@@ -415,7 +702,24 @@ async function sendDashboardFile(reply, filename) {
   }
 }
 
-app.get("/health", async () => ({
+app.get("/health", {
+  schema: {
+    summary: "Health check",
+    description: "Returns 200 if the API server process is running. Does **not** require authentication.",
+    tags: ["Session"],
+    security: [],
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          service: { type: "string" },
+          version: { type: "string" }
+        }
+      }
+    }
+  }
+}, async () => ({
   ok: true,
   service: pkg.name,
   version: pkg.version
@@ -515,7 +819,33 @@ if (config.dashboardEnabled) {
   });
 }
 
-app.get("/admin/overview", async () => {
+app.get("/admin/overview", {
+  schema: {
+    summary: "Service overview",
+    description: "Returns pairing status, browser state, and systemd service health for all GMweb components. **Master token only.**",
+    tags: ["Admin"],
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          service: { type: "string" },
+          version: { type: "string" },
+          now: { type: "string", format: "date-time" },
+          adminActionsEnabled: { type: "boolean" },
+          readiness: {
+            type: "object",
+            properties: {
+              ready: { type: "boolean" },
+              status: { type: "object" }
+            }
+          },
+          services: { type: "array", items: { type: "object" } }
+        }
+      }
+    }
+  }
+}, async () => {
   let readiness;
   try {
     let status = await client.status();
@@ -552,7 +882,34 @@ app.get("/admin/overview", async () => {
   };
 });
 
-app.post("/admin/action", async (request, reply) => {
+app.post("/admin/action", {
+  schema: {
+    summary: "Run admin action",
+    description: "Trigger a system-level action such as restarting the browser, toggling VNC, or running a smoke test. **Master token only.**",
+    tags: ["Admin"],
+    body: {
+      type: "object",
+      required: ["action"],
+      properties: {
+        action: {
+          type: "string",
+          enum: ["vnc-on", "vnc-off", "restart-api", "restart-chrome", "browser-start", "browser-restart", "smoke"],
+          description: "`restart-api` and `restart-chrome` are async (return immediately). All others are synchronous."
+        }
+      }
+    },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          action: { type: "string" },
+          queued: { type: "boolean", description: "True for async actions that are scheduled but not yet complete" }
+        }
+      }
+    }
+  }
+}, async (request, reply) => {
   const limit = checkRateLimit(request, "admin-action", config.adminActionMax, config.adminActionWindowMs);
   if (!limit.allowed) {
     reply.header("retry-after", String(limit.retryAfterSeconds));
@@ -616,7 +973,17 @@ app.post("/admin/action", async (request, reply) => {
   }
 });
 
-app.get("/ready", async (request, reply) => {
+app.get("/ready", {
+  schema: {
+    summary: "Readiness check",
+    description: "Returns 200 if Google Messages is paired and ready to send/receive. Returns 503 if not paired. Use this before calling `/send` to verify readiness.",
+    tags: ["Session"],
+    response: {
+      200: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object" } } },
+      503: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object" } } }
+    }
+  }
+}, async (request, reply) => {
   let status = await client.status();
   if (!status.paired && !status.qrVisible && !status.signInVisible) {
     await client.listConversations(1).catch(() => {});
@@ -629,44 +996,127 @@ app.get("/ready", async (request, reply) => {
   };
 });
 
-app.post("/browser/start", async () => {
+app.post("/browser/start", {
+  schema: {
+    summary: "Start browser",
+    description: "Launches the Playwright browser and navigates to Google Messages. **Master token only.**",
+    tags: ["Admin"]
+  }
+}, async () => {
   await client.start();
   return client.status();
 });
 
-app.post("/browser/stop", async () => {
+app.post("/browser/stop", {
+  schema: {
+    summary: "Stop browser",
+    description: "Gracefully closes the Playwright browser context. **Master token only.**",
+    tags: ["Admin"]
+  }
+}, async () => {
   await client.stop();
   return { stopped: true };
 });
 
-app.post("/browser/restart", async () => {
+app.post("/browser/restart", {
+  schema: {
+    summary: "Restart browser",
+    description: "Stops and restarts the Playwright browser. Use after pairing issues. **Master token only.**",
+    tags: ["Admin"]
+  }
+}, async () => {
   await client.stop();
   await client.start();
   return client.status();
 });
 
-app.get("/session/status", async () => client.status());
+app.get("/session/status", {
+  schema: {
+    summary: "Browser session status",
+    description: "Returns detailed browser and pairing state including URL, QR visibility, and pairing hint. **Master token only.**",
+    tags: ["Session"]
+  }
+}, async () => client.status());
 
-app.get("/session/screenshot", async (_request, reply) => {
+app.get("/session/screenshot", {
+  schema: {
+    summary: "Browser screenshot",
+    description: "Returns a full-page PNG screenshot of the current browser state. Useful for debugging pairing issues. **Master token only.**",
+    tags: ["Session"],
+    produces: ["image/png"],
+    response: { 200: { type: "string", format: "binary" } }
+  }
+}, async (_request, reply) => {
   const image = await client.screenshot();
   reply.type("image/png").send(image);
 });
 
-app.get("/conversations", async (request) => {
-  const limit = parseLimit(request.query.limit, 20, 100);
-  return {
-    conversations: await client.listConversations(limit)
-  };
+app.get("/conversations", {
+  schema: {
+    summary: "List conversations",
+    description: "Returns the most recent conversations visible in the Google Messages sidebar. Each item includes title, snippet, timestamp, unread status, and a stable `href` identifier.",
+    tags: ["Conversations"],
+    querystring: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 2000, default: 20, description: "Max number of conversations to return" }
+      }
+    },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          conversations: { type: "array", items: { $ref: "Conversation#" } }
+        }
+      }
+    }
+  }
+}, async (request) => {
+  const limit = parseLimit(request.query.limit, 20, 2000);
+  return { conversations: await client.listConversations(limit) };
 });
 
-app.get("/messages/active", async (request) => {
+app.get("/messages/active", {
+  schema: {
+    summary: "Messages in currently open conversation",
+    description: "Returns messages from whichever conversation the browser currently has open. Faster than `/conversations/messages` since it skips navigation. Use after `/conversations/open`.",
+    tags: ["Conversations"],
+    querystring: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 200, default: 50, description: "Max messages to return (most recent)" }
+      }
+    },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          messages: { type: "array", items: { $ref: "Message#" } }
+        }
+      }
+    }
+  }
+}, async (request) => {
   const limit = parseLimit(request.query.limit, 50, 200);
-  return {
-    messages: await client.getActiveConversationMessages(limit)
-  };
+  return { messages: await client.getActiveConversationMessages(limit) };
 });
 
-app.post("/conversations/open", async (request, reply) => {
+app.post("/conversations/open", {
+  schema: {
+    summary: "Open a conversation",
+    description: "Navigates the browser to a specific conversation. Provide exactly one of: `href` (recommended — stable identifier from `/conversations`), `id`, `title`, or `index`.",
+    tags: ["Conversations"],
+    body: {
+      type: "object",
+      properties: {
+        href: { type: "string", description: "Conversation path e.g. `/web/conversations/1234`. Most reliable identifier." },
+        id: { type: "string", description: "Conversation ID (same as href in most cases)" },
+        title: { type: "string", description: "Contact name (fuzzy matched)" },
+        index: { type: "integer", minimum: 0, description: "Zero-based position in conversation list" }
+      }
+    }
+  }
+}, async (request, reply) => {
   const schema = z.object({
     id: z.string().optional(),
     href: z.string().optional(),
@@ -685,7 +1135,32 @@ app.post("/conversations/open", async (request, reply) => {
   return client.openConversation(parsed.data);
 });
 
-app.post("/conversations/messages", async (request, reply) => {
+app.post("/conversations/messages", {
+  schema: {
+    summary: "Get conversation messages",
+    description: "Opens the specified conversation and returns its messages. Slower than `/messages/active` because it navigates the browser. Returns both message bubbles and timestamps in order.",
+    tags: ["Conversations"],
+    body: {
+      type: "object",
+      properties: {
+        href: { type: "string", description: "Conversation path from `/conversations` response. Use this for reliability." },
+        id: { type: "string" },
+        title: { type: "string" },
+        index: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: 200, default: 50, description: "Max messages to return" }
+      }
+    },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          conversation: { $ref: "Conversation#" },
+          messages: { type: "array", items: { $ref: "Message#" } }
+        }
+      }
+    }
+  }
+}, async (request, reply) => {
   const schema = z.object({
     id: z.string().optional(),
     href: z.string().optional(),
@@ -722,20 +1197,393 @@ if (config.enableDebugRoutes) {
   });
 }
 
-app.post("/send", async (request, reply) => {
+app.post("/send", {
+  schema: {
+    summary: "Send a message (queued)",
+    description: [
+      "Queue an SMS/RCS message for delivery via Google Messages.",
+      "",
+      "**Asynchronous by default.** The message is added to a durable Redis-backed",
+      "queue and processed in the background by a single worker (one browser, one",
+      "send at a time). The endpoint returns a `jobId` immediately with HTTP 202.",
+      "",
+      "**Track delivery via:**",
+      "- `GET /send/status/{jobId}` — poll the job state",
+      "- `GET /events` (SSE) — real-time `send_processing` / `send_completed` / `send_failed`",
+      "",
+      "**Retries:** failed sends retry up to 3 times with exponential backoff.",
+      "",
+      "**Synchronous mode:** pass `\"wait\": true` to block until the send finishes",
+      "(up to 90s) and receive the result directly. Use only for low-volume callers.",
+      "",
+      "**Rate limits (project keys):** configurable per-minute and per-hour (default 10/min, 100/hr).",
+      "",
+      "**Phone format:** include country code, e.g. `+989121234567`."
+    ].join("\n"),
+    tags: ["Messaging"],
+    body: {
+      type: "object",
+      required: ["to", "text"],
+      properties: {
+        to: { type: "string", minLength: 3, maxLength: 32, description: "Recipient phone number with country code, e.g. `+989121234567`" },
+        text: { type: "string", minLength: 1, maxLength: 4000, description: "Message content. Plain text only." },
+        wait: { type: "boolean", default: false, description: "If true, block until the send completes (max 90s) and return the result." },
+        priority: { type: "integer", minimum: 1, maximum: 10, description: "Job priority (1 = highest). Lower numbers are processed first." }
+      },
+      examples: [{ to: "+989121234567", text: "Hello from GMweb API!" }]
+    },
+    response: {
+      202: {
+        type: "object",
+        description: "Message accepted and queued",
+        properties: {
+          ok: { type: "boolean" },
+          jobId: { type: "string" },
+          status: { type: "string", enum: ["queued"] },
+          queuePosition: { type: "integer", description: "Approximate number of jobs ahead (incl. active)" }
+        }
+      },
+      200: {
+        type: "object",
+        description: "Returned only when wait=true and the send succeeded",
+        properties: {
+          ok: { type: "boolean" },
+          jobId: { type: "string" },
+          status: { type: "string", enum: ["completed"] },
+          result: { type: "object" }
+        }
+      },
+      429: {
+        type: "object",
+        properties: {
+          error: { type: "string", enum: ["send_rate_limited"] },
+          reason: { type: "string", enum: ["per_minute_limit", "per_hour_limit"] },
+          limits: { type: "object", properties: { minute: { type: "integer" }, hour: { type: "integer" } } },
+          used: { type: "object", properties: { minute: { type: "integer" }, hour: { type: "integer" } } }
+        }
+      },
+      502: {
+        type: "object",
+        description: "Returned only when wait=true and the send failed",
+        properties: {
+          ok: { type: "boolean" },
+          jobId: { type: "string" },
+          status: { type: "string", enum: ["failed"] },
+          error: { type: "string" }
+        }
+      }
+    }
+  }
+}, async (request, reply) => {
+  // Per-project rate limit (only applies to project API keys, not master)
+  const projectKey = request._projectKey;
+  if (projectKey) {
+    const rate = apiKeyStore.checkSendRate(projectKey.id);
+    if (!rate.allowed) {
+      reply.header("retry-after", "60");
+      reply.code(429).send({
+        error: "send_rate_limited",
+        reason: rate.reason,
+        limits: rate.limits,
+        used: { minute: rate.minuteUsed, hour: rate.hourUsed }
+      });
+      return;
+    }
+  }
+
   const schema = z.object({
     to: z.string().min(3).max(32),
-    text: z.string().min(1).max(4000)
+    text: z.string().min(1).max(4000),
+    wait: z.boolean().optional(),
+    priority: z.number().int().min(1).max(10).optional()
   });
   const parsed = schema.safeParse(request.body);
   if (!parsed.success) {
     reply.code(400).send({ error: "invalid_body", details: parsed.error.flatten() });
     return;
   }
-  return client.sendMessage(parsed.data);
+  const { to, text, wait, priority } = parsed.data;
+
+  const job = await sendQueue.enqueue(
+    { to, text, keyId: projectKey?.id || null, keyName: projectKey?.name || "master" },
+    priority ? { priority } : {}
+  );
+  emitSse({ type: "send_queued", jobId: job.id, to, at: new Date().toISOString() });
+
+  if (wait) {
+    try {
+      const result = await sendQueue.waitForJob(job, 90000);
+      return { ok: true, jobId: job.id, status: "completed", result };
+    } catch (error) {
+      reply.code(502).send({ ok: false, jobId: job.id, status: "failed", error: error.message });
+      return;
+    }
+  }
+
+  const counts = await sendQueue.counts().catch(() => ({}));
+  reply.code(202);
+  return {
+    ok: true,
+    jobId: job.id,
+    status: "queued",
+    queuePosition: (counts.waiting || 0) + (counts.active || 0)
+  };
 });
 
-app.get("/events", async (request, reply) => {
+app.get("/send/status/:jobId", {
+  schema: {
+    summary: "Get send job status",
+    description: "Returns the current state of a queued send job: `waiting`, `active`, `completed`, `failed`, or `delayed` (awaiting retry). Includes attempt count and result/error.",
+    tags: ["Messaging"],
+    params: { type: "object", properties: { jobId: { type: "string" } } },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          state: { type: "string", enum: ["waiting", "active", "completed", "failed", "delayed"] },
+          to: { type: "string" },
+          attemptsMade: { type: "integer" },
+          maxAttempts: { type: "integer" },
+          result: { type: ["object", "null"] },
+          failedReason: { type: ["string", "null"] },
+          createdAt: { type: ["string", "null"] },
+          processedAt: { type: ["string", "null"] },
+          finishedAt: { type: ["string", "null"] }
+        }
+      }
+    }
+  }
+}, async (request, reply) => {
+  const status = await sendQueue.jobStatus(request.params.jobId);
+  if (!status) { reply.code(404).send({ error: "not_found" }); return; }
+  return status;
+});
+
+app.get("/admin/queue", {
+  schema: {
+    summary: "Send queue stats",
+    description: "Returns counts of jobs by state in the send queue. **Master token only.**",
+    tags: ["Admin"],
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          counts: {
+            type: "object",
+            properties: {
+              waiting: { type: "integer" },
+              active: { type: "integer" },
+              completed: { type: "integer" },
+              failed: { type: "integer" },
+              delayed: { type: "integer" }
+            }
+          }
+        }
+      }
+    }
+  }
+}, async () => ({ counts: await sendQueue.counts() }));
+
+// ─── API Key Management (master / dashboard only) ────────────────────────────
+
+app.get("/admin/api-keys", {
+  schema: {
+    summary: "List API keys",
+    description: "Returns all project API keys with metadata. The actual token is **never** returned here — it is only shown once at creation. **Master token only.**",
+    tags: ["API Keys"],
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          keys: { type: "array", items: { $ref: "ApiKey#" } }
+        }
+      }
+    }
+  }
+}, async () => ({ keys: apiKeyStore.list() }));
+
+app.post("/admin/api-keys", {
+  schema: {
+    summary: "Create API key",
+    description: [
+      "Creates a new project API key. The **full token is returned only in this response** — store it immediately.",
+      "",
+      "The token is stored as a SHA-256 hash on disk. If lost, use the `/rotate` endpoint to generate a new one.",
+      "",
+      "**Master token only.**"
+    ].join("\n"),
+    tags: ["API Keys"],
+    body: {
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: 64, description: "Human-readable project name" },
+        allowedIps: {
+          type: "array", items: { type: "string" }, maxItems: 30,
+          description: "Allowed source IPs. Empty array = accept from any IP. Recommended: set to your server's IP."
+        },
+        rateLimit: {
+          type: "object",
+          properties: {
+            minute: { type: "integer", minimum: 0, default: 10, description: "Max /send calls per minute (0 = unlimited)" },
+            hour: { type: "integer", minimum: 0, default: 100, description: "Max /send calls per hour (0 = unlimited)" }
+          }
+        }
+      },
+      examples: [{ name: "MyProject", allowedIps: ["1.2.3.4"], rateLimit: { minute: 5, hour: 50 } }]
+    },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          key: {
+            allOf: [{ $ref: "ApiKey#" }],
+            properties: { token: { type: "string", description: "Full token — shown ONCE. Store it now." } }
+          }
+        }
+      }
+    }
+  }
+}, async (request, reply) => {
+  const schema = z.object({
+    name: z.string().min(1).max(64),
+    allowedIps: z.array(z.string()).max(30).optional(),
+    rateLimit: z.object({
+      minute: z.number().int().min(0).optional(),
+      hour: z.number().int().min(0).optional()
+    }).optional()
+  });
+  const parsed = schema.safeParse(request.body || {});
+  if (!parsed.success) {
+    reply.code(400).send({ error: "invalid_body", details: parsed.error.flatten() });
+    return;
+  }
+  const key = apiKeyStore.create(parsed.data);
+  return { ok: true, key };
+});
+
+app.patch("/admin/api-keys/:id", {
+  schema: {
+    summary: "Update API key",
+    description: "Update name, allowed IPs, send rate limits, or enable/disable a key. **Master token only.**",
+    tags: ["API Keys"],
+    params: { type: "object", properties: { id: { type: "string", description: "Key ID from list endpoint" } } },
+    body: {
+      type: "object",
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: 64 },
+        allowedIps: { type: "array", items: { type: "string" }, maxItems: 30 },
+        enabled: { type: "boolean" },
+        sendRateMinute: { type: "integer", minimum: 0, maximum: 10000 },
+        sendRateHour: { type: "integer", minimum: 0, maximum: 100000 }
+      }
+    }
+  }
+}, async (request, reply) => {
+  const schema = z.object({
+    name: z.string().min(1).max(64).optional(),
+    allowedIps: z.array(z.string()).max(30).optional(),
+    enabled: z.boolean().optional(),
+    sendRateMinute: z.number().int().min(0).max(10000).optional(),
+    sendRateHour: z.number().int().min(0).max(100000).optional()
+  });
+  const parsed = schema.safeParse(request.body || {});
+  if (!parsed.success) {
+    reply.code(400).send({ error: "invalid_body", details: parsed.error.flatten() });
+    return;
+  }
+  const updated = apiKeyStore.update(request.params.id, parsed.data);
+  if (!updated) { reply.code(404).send({ error: "not_found" }); return; }
+  return { ok: true, key: updated };
+});
+
+app.post("/admin/api-keys/:id/rotate", {
+  schema: {
+    summary: "Rotate token",
+    description: "Generates a new token for this key. **The old token is immediately invalidated.** The new token is shown only once in this response. **Master token only.**",
+    tags: ["API Keys"],
+    params: { type: "object", properties: { id: { type: "string" } } },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          key: {
+            allOf: [{ $ref: "ApiKey#" }],
+            properties: { token: { type: "string", description: "New token — shown ONCE." } }
+          }
+        }
+      }
+    }
+  }
+}, async (request, reply) => {
+  const result = apiKeyStore.rotate(request.params.id);
+  if (!result) { reply.code(404).send({ error: "not_found" }); return; }
+  return { ok: true, key: result };
+});
+
+app.delete("/admin/api-keys/:id", {
+  schema: {
+    summary: "Delete API key",
+    description: "Permanently deletes a key. Any requests using this key will immediately return 401. **Master token only.**",
+    tags: ["API Keys"],
+    params: { type: "object", properties: { id: { type: "string" } } }
+  }
+}, async (request, reply) => {
+  const ok = apiKeyStore.delete(request.params.id);
+  if (!ok) { reply.code(404).send({ error: "not_found" }); return; }
+  return { ok: true };
+});
+
+app.get("/admin/api-logs", {
+  schema: {
+    summary: "Request logs",
+    description: "Returns the most recent API requests made with project keys (not master token). Includes timestamp, key name, IP, method, path. **Master token only.**",
+    tags: ["API Keys"],
+    querystring: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 },
+        keyId: { type: "string", description: "Filter logs by a specific key ID" }
+      }
+    }
+  }
+}, async (request) => {
+  const limit = parseLimit(request.query.limit, 100, 1000);
+  const keyId = request.query.keyId || undefined;
+  return { logs: await apiKeyStore.getLogs({ limit, keyId }) };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get("/events", {
+  schema: {
+    summary: "Server-Sent Events stream",
+    description: [
+      "Subscribe to real-time events using SSE (Server-Sent Events).",
+      "",
+      "**Event types:**",
+      "- `conversation_changed` — a conversation's last message or unread state changed",
+      "- `send_queued` — a message was accepted into the send queue",
+      "- `send_processing` — the worker started sending a queued message",
+      "- `send_completed` — a queued message was sent successfully (includes `jobId`)",
+      "- `send_failed` — a send attempt failed (`willRetry` indicates if it will be retried)",
+      "",
+      "**Usage (JavaScript):**",
+      "```js",
+      "const es = new EventSource('/events', { headers: { Authorization: 'Bearer gmw_...' } });",
+      "es.onmessage = (e) => console.log(JSON.parse(e.data));",
+      "```",
+      "",
+      "Connection stays open until closed by the client. Reconnect with exponential backoff."
+    ].join("\n"),
+    tags: ["Messaging"],
+    produces: ["text/event-stream"],
+    response: { 200: { type: "string", description: "SSE stream" } }
+  }
+}, async (request, reply) => {
   reply.raw.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
@@ -754,12 +1602,15 @@ async function main() {
     throw new Error("API_TOKEN is required when NODE_ENV=production.");
   }
   await loadSessions();
+  await apiKeyStore.load();
+  startSendWorker();
   await app.listen({ host: config.host, port: config.port });
   client.start().catch((error) => app.log.warn({ error }, "auto browser start failed"));
 }
 
 async function shutdown(signal) {
   app.log.info({ signal }, "shutting down");
+  await sendQueue.close().catch((error) => app.log.warn({ error }, "queue close failed"));
   await client.stop().catch((error) => app.log.warn({ error }, "browser stop failed"));
   await app.close().catch((error) => app.log.warn({ error }, "server close failed"));
   process.exit(0);
