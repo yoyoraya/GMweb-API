@@ -1,0 +1,1628 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "GMweb API",
+    "description": "Google Messages SMS/RCS gateway — control Google Messages Web via a REST API.\n\n## Authentication\nAll endpoints (except `/health`) require a Bearer token in the `Authorization` header.\n\nTwo token types are accepted:\n- **Master token** (`API_TOKEN` env var) — full access to all endpoints including admin and key management.\n- **Project API key** (`gmw_...`) — access to messaging & conversation endpoints only. Admin routes return 401.\n\n```\nAuthorization: Bearer gmw_your_project_token\n```\n\n## Rate Limits\nProject keys have configurable per-minute and per-hour send limits.\nRepeated auth failures from an IP trigger a 30-minute block.",
+    "version": "0.1.0",
+    "contact": {
+      "name": "GMweb API"
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "gmw_... or master API_TOKEN",
+        "description": "Pass your API token. Project keys start with `gmw_`. Master key is the API_TOKEN env var."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Machine-readable error code"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable description"
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "message",
+              "timestamp"
+            ]
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "in",
+              "out"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "aria": {
+            "type": "string"
+          }
+        }
+      },
+      "Conversation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "href": {
+            "type": "string",
+            "description": "Stable conversation path (use as identifier)"
+          },
+          "title": {
+            "type": "string",
+            "description": "Contact name"
+          },
+          "snippet": {
+            "type": "string",
+            "description": "Last message preview"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "unread": {
+            "type": "boolean"
+          },
+          "unreadCount": {
+            "type": "integer"
+          },
+          "pinned": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Key ID (hex)"
+          },
+          "name": {
+            "type": "string"
+          },
+          "allowedIps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Allowed source IPs. Empty = any IP."
+          },
+          "sendRateMinute": {
+            "type": "integer",
+            "description": "Max /send calls per minute (0 = unlimited)"
+          },
+          "sendRateHour": {
+            "type": "integer",
+            "description": "Max /send calls per hour (0 = unlimited)"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastUsedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "requestCount": {
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "tokenPreview": {
+            "type": "string",
+            "description": "First 8 chars of token for identification"
+          }
+        }
+      },
+      "def-0": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "message",
+              "timestamp"
+            ]
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "in",
+              "out"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "aria": {
+            "type": "string"
+          }
+        },
+        "title": "Message"
+      },
+      "def-1": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "href": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "snippet": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "unread": {
+            "type": "boolean"
+          },
+          "unreadCount": {
+            "type": "integer"
+          },
+          "pinned": {
+            "type": "boolean"
+          }
+        },
+        "title": "Conversation"
+      },
+      "def-2": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "allowedIps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sendRateMinute": {
+            "type": "integer"
+          },
+          "sendRateHour": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastUsedAt": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "requestCount": {
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "tokenPreview": {
+            "type": "string"
+          }
+        },
+        "title": "ApiKey"
+      }
+    }
+  },
+  "paths": {
+    "/vnc/": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "head": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "options": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/vnc/{*}": {
+      "delete": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "*",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "*",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "head": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "*",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "patch": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "*",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "*",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "put": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "*",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "options": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "*",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "tags": [
+          "Session"
+        ],
+        "description": "Returns 200 if the API server process is running. Does **not** require authentication.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "service": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/dashboard": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/dashboard/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/dashboard/{file}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "file",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/dashboard/session": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/dashboard/password-login": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/dashboard/login": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/dashboard/logout": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/admin/overview": {
+      "get": {
+        "summary": "Service overview",
+        "tags": [
+          "Admin"
+        ],
+        "description": "Returns pairing status, browser state, and systemd service health for all GMweb components. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "service": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "now": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "adminActionsEnabled": {
+                      "type": "boolean"
+                    },
+                    "readiness": {
+                      "type": "object",
+                      "properties": {
+                        "ready": {
+                          "type": "boolean"
+                        },
+                        "status": {
+                          "type": "object"
+                        }
+                      }
+                    },
+                    "services": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/action": {
+      "post": {
+        "summary": "Run admin action",
+        "tags": [
+          "Admin"
+        ],
+        "description": "Trigger a system-level action such as restarting the browser, toggling VNC, or running a smoke test. **Master token only.**",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "action"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "vnc-on",
+                      "vnc-off",
+                      "restart-api",
+                      "restart-chrome",
+                      "browser-start",
+                      "browser-restart",
+                      "smoke"
+                    ],
+                    "description": "`restart-api` and `restart-chrome` are async (return immediately). All others are synchronous."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "action": {
+                      "type": "string"
+                    },
+                    "queued": {
+                      "type": "boolean",
+                      "description": "True for async actions that are scheduled but not yet complete"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Readiness check",
+        "tags": [
+          "Session"
+        ],
+        "description": "Returns 200 if Google Messages is paired and ready to send/receive. Returns 503 if not paired. Use this before calling `/send` to verify readiness.",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/browser/start": {
+      "post": {
+        "summary": "Start browser",
+        "tags": [
+          "Admin"
+        ],
+        "description": "Launches the Playwright browser and navigates to Google Messages. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/browser/stop": {
+      "post": {
+        "summary": "Stop browser",
+        "tags": [
+          "Admin"
+        ],
+        "description": "Gracefully closes the Playwright browser context. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/browser/restart": {
+      "post": {
+        "summary": "Restart browser",
+        "tags": [
+          "Admin"
+        ],
+        "description": "Stops and restarts the Playwright browser. Use after pairing issues. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/session/status": {
+      "get": {
+        "summary": "Browser session status",
+        "tags": [
+          "Session"
+        ],
+        "description": "Returns detailed browser and pairing state including URL, QR visibility, and pairing hint. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/session/screenshot": {
+      "get": {
+        "summary": "Browser screenshot",
+        "tags": [
+          "Session"
+        ],
+        "description": "Returns a full-page PNG screenshot of the current browser state. Useful for debugging pairing issues. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations": {
+      "get": {
+        "summary": "List conversations",
+        "tags": [
+          "Conversations"
+        ],
+        "description": "Returns the most recent conversations visible in the Google Messages sidebar. Each item includes title, snippet, timestamp, unread status, and a stable `href` identifier.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000,
+              "default": 20
+            },
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max number of conversations to return"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "conversations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/def-1"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/active": {
+      "get": {
+        "summary": "Messages in currently open conversation",
+        "tags": [
+          "Conversations"
+        ],
+        "description": "Returns messages from whichever conversation the browser currently has open. Faster than `/conversations/messages` since it skips navigation. Use after `/conversations/open`.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            },
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max messages to return (most recent)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messages": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/def-0"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/open": {
+      "post": {
+        "summary": "Open a conversation",
+        "tags": [
+          "Conversations"
+        ],
+        "description": "Navigates the browser to a specific conversation. Provide exactly one of: `href` (recommended — stable identifier from `/conversations`), `id`, `title`, or `index`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "href": {
+                    "type": "string",
+                    "description": "Conversation path e.g. `/web/conversations/1234`. Most reliable identifier."
+                  },
+                  "id": {
+                    "type": "string",
+                    "description": "Conversation ID (same as href in most cases)"
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "Contact name (fuzzy matched)"
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Zero-based position in conversation list"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/conversations/messages": {
+      "post": {
+        "summary": "Get conversation messages",
+        "tags": [
+          "Conversations"
+        ],
+        "description": "Opens the specified conversation and returns its messages. Slower than `/messages/active` because it navigates the browser. Returns both message bubbles and timestamps in order.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "href": {
+                    "type": "string",
+                    "description": "Conversation path from `/conversations` response. Use this for reliability."
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                    "description": "Max messages to return"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "conversation": {
+                      "$ref": "#/components/schemas/def-1"
+                    },
+                    "messages": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/def-0"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/send": {
+      "post": {
+        "summary": "Send a message (queued)",
+        "tags": [
+          "Messaging"
+        ],
+        "description": "Queue an SMS/RCS message for delivery via Google Messages.\n\n**Asynchronous by default.** The message is added to a durable Redis-backed\nqueue and processed in the background by a single worker (one browser, one\nsend at a time). The endpoint returns a `jobId` immediately with HTTP 202.\n\n**Track delivery via:**\n- `GET /send/status/{jobId}` — poll the job state\n- `GET /events` (SSE) — real-time `send_processing` / `send_completed` / `send_failed`\n\n**Retries:** failed sends retry up to 3 times with exponential backoff.\n\n**Synchronous mode:** pass `\"wait\": true` to block until the send finishes\n(up to 90s) and receive the result directly. Use only for low-volume callers.\n\n**Rate limits (project keys):** configurable per-minute and per-hour (default 10/min, 100/hr).\n\n**Phone format:** include country code, e.g. `+989121234567`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "to",
+                  "text"
+                ],
+                "properties": {
+                  "to": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 32,
+                    "description": "Recipient phone number with country code, e.g. `+989121234567`"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000,
+                    "description": "Message content. Plain text only."
+                  },
+                  "wait": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "If true, block until the send completes (max 90s) and return the result."
+                  },
+                  "priority": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Job priority (1 = highest). Lower numbers are processed first."
+                  }
+                }
+              },
+              "example": {
+                "to": "+989121234567",
+                "text": "Hello from GMweb API!"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Returned only when wait=true and the send succeeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Returned only when wait=true and the send succeeded",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "jobId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "completed"
+                      ]
+                    },
+                    "result": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Message accepted and queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Message accepted and queued",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "jobId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "queued"
+                      ]
+                    },
+                    "queuePosition": {
+                      "type": "integer",
+                      "description": "Approximate number of jobs ahead (incl. active)"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "send_rate_limited"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "per_minute_limit",
+                        "per_hour_limit"
+                      ]
+                    },
+                    "limits": {
+                      "type": "object",
+                      "properties": {
+                        "minute": {
+                          "type": "integer"
+                        },
+                        "hour": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "used": {
+                      "type": "object",
+                      "properties": {
+                        "minute": {
+                          "type": "integer"
+                        },
+                        "hour": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Returned only when wait=true and the send failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Returned only when wait=true and the send failed",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "jobId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "failed"
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/send/status/{jobId}": {
+      "get": {
+        "summary": "Get send job status",
+        "tags": [
+          "Messaging"
+        ],
+        "description": "Returns the current state of a queued send job: `waiting`, `active`, `completed`, `failed`, or `delayed` (awaiting retry). Includes attempt count and result/error.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "jobId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "waiting",
+                        "active",
+                        "completed",
+                        "failed",
+                        "delayed"
+                      ]
+                    },
+                    "to": {
+                      "type": "string"
+                    },
+                    "attemptsMade": {
+                      "type": "integer"
+                    },
+                    "maxAttempts": {
+                      "type": "integer"
+                    },
+                    "result": {
+                      "type": [
+                        "null",
+                        "object"
+                      ]
+                    },
+                    "failedReason": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "createdAt": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "processedAt": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "finishedAt": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/queue": {
+      "get": {
+        "summary": "Send queue stats",
+        "tags": [
+          "Admin"
+        ],
+        "description": "Returns counts of jobs by state in the send queue. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "counts": {
+                      "type": "object",
+                      "properties": {
+                        "waiting": {
+                          "type": "integer"
+                        },
+                        "active": {
+                          "type": "integer"
+                        },
+                        "completed": {
+                          "type": "integer"
+                        },
+                        "failed": {
+                          "type": "integer"
+                        },
+                        "delayed": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/api-keys": {
+      "get": {
+        "summary": "List API keys",
+        "tags": [
+          "API Keys"
+        ],
+        "description": "Returns all project API keys with metadata. The actual token is **never** returned here — it is only shown once at creation. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "keys": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/def-2"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create API key",
+        "tags": [
+          "API Keys"
+        ],
+        "description": "Creates a new project API key. The **full token is returned only in this response** — store it immediately.\n\nThe token is stored as a SHA-256 hash on disk. If lost, use the `/rotate` endpoint to generate a new one.\n\n**Master token only.**",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Human-readable project name"
+                  },
+                  "allowedIps": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 30,
+                    "description": "Allowed source IPs. Empty array = accept from any IP. Recommended: set to your server's IP."
+                  },
+                  "rateLimit": {
+                    "type": "object",
+                    "properties": {
+                      "minute": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 10,
+                        "description": "Max /send calls per minute (0 = unlimited)"
+                      },
+                      "hour": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 100,
+                        "description": "Max /send calls per hour (0 = unlimited)"
+                      }
+                    }
+                  }
+                }
+              },
+              "example": {
+                "name": "MyProject",
+                "allowedIps": [
+                  "1.2.3.4"
+                ],
+                "rateLimit": {
+                  "minute": 5,
+                  "hour": 50
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "key": {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/def-2"
+                        }
+                      ],
+                      "properties": {
+                        "token": {
+                          "type": "string",
+                          "description": "Full token — shown ONCE. Store it now."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/api-keys/{id}": {
+      "patch": {
+        "summary": "Update API key",
+        "tags": [
+          "API Keys"
+        ],
+        "description": "Update name, allowed IPs, send rate limits, or enable/disable a key. **Master token only.**",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "allowedIps": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 30
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "sendRateMinute": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "sendRateHour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "Key ID from list endpoint"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete API key",
+        "tags": [
+          "API Keys"
+        ],
+        "description": "Permanently deletes a key. Any requests using this key will immediately return 401. **Master token only.**",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/admin/api-keys/{id}/rotate": {
+      "post": {
+        "summary": "Rotate token",
+        "tags": [
+          "API Keys"
+        ],
+        "description": "Generates a new token for this key. **The old token is immediately invalidated.** The new token is shown only once in this response. **Master token only.**",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "key": {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/def-2"
+                        }
+                      ],
+                      "properties": {
+                        "token": {
+                          "type": "string",
+                          "description": "New token — shown ONCE."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/api-logs": {
+      "get": {
+        "summary": "Request logs",
+        "tags": [
+          "API Keys"
+        ],
+        "description": "Returns the most recent API requests made with project keys (not master token). Includes timestamp, key name, IP, method, path. **Master token only.**",
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 100
+            },
+            "in": "query",
+            "name": "limit",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "keyId",
+            "required": false,
+            "description": "Filter logs by a specific key ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "summary": "Server-Sent Events stream",
+        "tags": [
+          "Messaging"
+        ],
+        "description": "Subscribe to real-time events using SSE (Server-Sent Events).\n\n**Event types:**\n- `conversation_changed` — a conversation's last message or unread state changed\n- `send_queued` — a message was accepted into the send queue\n- `send_processing` — the worker started sending a queued message\n- `send_completed` — a queued message was sent successfully (includes `jobId`)\n- `send_failed` — a send attempt failed (`willRetry` indicates if it will be retried)\n\n**Usage (JavaScript):**\n```js\nconst es = new EventSource('/events', { headers: { Authorization: 'Bearer gmw_...' } });\nes.onmessage = (e) => console.log(JSON.parse(e.data));\n```\n\nConnection stays open until closed by the client. Reconnect with exponential backoff.",
+        "responses": {
+          "200": {
+            "description": "SSE stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "SSE stream"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This server"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Messaging",
+      "description": "Send messages"
+    },
+    {
+      "name": "Conversations",
+      "description": "Browse and read conversation history"
+    },
+    {
+      "name": "Session",
+      "description": "Browser session and pairing status"
+    },
+    {
+      "name": "Admin",
+      "description": "Service administration — master token only"
+    },
+    {
+      "name": "API Keys",
+      "description": "Manage project API keys — master token only"
+    }
+  ]
+}

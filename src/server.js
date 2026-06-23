@@ -632,6 +632,11 @@ if (config.dashboardEnabled) {
   });
 }
 
+// Routes are registered inside app.after() so they run AFTER @fastify/swagger has
+// loaded its onRoute hook. Routes added before that hook attaches are invisible to
+// the generated OpenAPI spec (/docs would only show the proxy routes otherwise).
+app.after(() => {
+
 function parseLimit(value, fallback, max) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return fallback;
@@ -1597,6 +1602,8 @@ app.get("/events", {
   });
 });
 
+}); // end app.after — routes are now registered after swagger's onRoute hook
+
 async function main() {
   if (config.appEnv === "production" && !config.apiToken) {
     throw new Error("API_TOKEN is required when NODE_ENV=production.");
@@ -1616,10 +1623,16 @@ async function shutdown(signal) {
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+// Only boot (listen, start worker/browser) when run directly, not when the app
+// is imported by tooling such as scripts/generate-openapi.js.
+if (require.main === module) {
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
-main().catch((error) => {
-  app.log.error(error);
-  process.exit(1);
-});
+  main().catch((error) => {
+    app.log.error(error);
+    process.exit(1);
+  });
+}
+
+module.exports = { app };
