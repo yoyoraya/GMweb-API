@@ -4,3 +4,6 @@ data/
 .vscode/
 *.log
 *.code-workspace
+
+# graphify regenerable cache (graph itself is committed)
+graphify-out/cache/

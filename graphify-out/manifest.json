@@ -1,0 +1,142 @@
+{
+  "C:\\Users\\Mahna\\GoogleMEssage\\docs\\openapi.json": {
+    "mtime": 1782197889.9134705,
+    "ast_hash": "c31ba0bfd4d4474370a8a1a1098a85df",
+    "semantic_hash": "c31ba0bfd4d4474370a8a1a1098a85df"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\install\\ubuntu22.sh": {
+    "mtime": 1782032185.7585013,
+    "ast_hash": "b332541a6368eb7364db6d7c3735524d",
+    "semantic_hash": "b332541a6368eb7364db6d7c3735524d"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\package.json": {
+    "mtime": 1782197554.1687162,
+    "ast_hash": "b5aee205f130a77d39f6fff99884a941",
+    "semantic_hash": "b5aee205f130a77d39f6fff99884a941"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\public\\dashboard\\app.js": {
+    "mtime": 1782128647.201703,
+    "ast_hash": "37bb299d4388163e9566152dfb962524",
+    "semantic_hash": "37bb299d4388163e9566152dfb962524"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\doctor.js": {
+    "mtime": 1781949000.4087358,
+    "ast_hash": "543dd09a69466e806373b7208c867221",
+    "semantic_hash": "543dd09a69466e806373b7208c867221"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\export-openapi.js": {
+    "mtime": 1782197089.99208,
+    "ast_hash": "9f7022dc97f4a85e2d515489e41ef96c",
+    "semantic_hash": "9f7022dc97f4a85e2d515489e41ef96c"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\generate-openapi.js": {
+    "mtime": 1782197543.6976874,
+    "ast_hash": "82a9903c6253c43846ed02ae6c638cf7",
+    "semantic_hash": "82a9903c6253c43846ed02ae6c638cf7"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\gmweb-menu.sh": {
+    "mtime": 1782029336.2881274,
+    "ast_hash": "ffe94d18e0e80aeddd00ea57f1596e61",
+    "semantic_hash": "ffe94d18e0e80aeddd00ea57f1596e61"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\pairing-vnc.sh": {
+    "mtime": 1782030202.232913,
+    "ast_hash": "f23e507aeb0586c0b5443246c1f0145c",
+    "semantic_hash": "f23e507aeb0586c0b5443246c1f0145c"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\public-dashboard.sh": {
+    "mtime": 1782033179.5722125,
+    "ast_hash": "286a6278b846e1d11e8c3ef10afd3212",
+    "semantic_hash": "286a6278b846e1d11e8c3ef10afd3212"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\smoke.js": {
+    "mtime": 1781948684.6221366,
+    "ast_hash": "446c65fa946cbc8cd0bd268275e0d380",
+    "semantic_hash": "446c65fa946cbc8cd0bd268275e0d380"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\uninstall.sh": {
+    "mtime": 1782029336.2951777,
+    "ast_hash": "e4a9a2b60d8a128f850acfc8a25fbd19",
+    "semantic_hash": "e4a9a2b60d8a128f850acfc8a25fbd19"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\scripts\\vps-chrome.sh": {
+    "mtime": 1781950023.9202175,
+    "ast_hash": "8512ad37e7c067ffaba1e17e369e187c",
+    "semantic_hash": "8512ad37e7c067ffaba1e17e369e187c"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\src\\apiKeys.js": {
+    "mtime": 1782052705.553467,
+    "ast_hash": "97b7e7ca5b2afb73475f42a7b37cb91b",
+    "semantic_hash": "97b7e7ca5b2afb73475f42a7b37cb91b"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\src\\config.js": {
+    "mtime": 1782039243.1143503,
+    "ast_hash": "cbcf6532184d651fed36b74a5dd54e3a",
+    "semantic_hash": "cbcf6532184d651fed36b74a5dd54e3a"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\src\\googleMessagesClient.js": {
+    "mtime": 1782128621.2866464,
+    "ast_hash": "50371e987a19f03d4a6264d02fb20389",
+    "semantic_hash": "50371e987a19f03d4a6264d02fb20389"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\src\\openLoginChrome.js": {
+    "mtime": 1781946007.6681173,
+    "ast_hash": "9ce4d8acd7acccfb14cb4c70e85645ef",
+    "semantic_hash": "9ce4d8acd7acccfb14cb4c70e85645ef"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\src\\queue.js": {
+    "mtime": 1782126294.3932736,
+    "ast_hash": "758dff8bc319243ac271246b7ad854e2",
+    "semantic_hash": "758dff8bc319243ac271246b7ad854e2"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\src\\server.js": {
+    "mtime": 1782197871.5847425,
+    "ast_hash": "3c4ada478a5dbe88edcb7c98e6cd10a2",
+    "semantic_hash": "3c4ada478a5dbe88edcb7c98e6cd10a2"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\CLAUDE.md": {
+    "mtime": 1782198116.6770267,
+    "ast_hash": "7dc3bc29436327081a8f348c9cbbf9d2",
+    "semantic_hash": "7dc3bc29436327081a8f348c9cbbf9d2"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\README.md": {
+    "mtime": 1782032084.135248,
+    "ast_hash": "b1e7b5b7886c5d67e20481eef2014c61",
+    "semantic_hash": "b1e7b5b7886c5d67e20481eef2014c61"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\docs\\API.md": {
+    "mtime": 1781950308.3916473,
+    "ast_hash": "28a2338f5db990a5874a634ccfcd6ca7",
+    "semantic_hash": "28a2338f5db990a5874a634ccfcd6ca7"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\docs\\INTEGRATION.md": {
+    "mtime": 1782197153.9548275,
+    "ast_hash": "945993008736d1f5373cbae31c3564c3",
+    "semantic_hash": "945993008736d1f5373cbae31c3564c3"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\docs\\OPERATIONS.md": {
+    "mtime": 1782032084.137777,
+    "ast_hash": "884e5eed9745abf1af286000f430b750",
+    "semantic_hash": "884e5eed9745abf1af286000f430b750"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\docs\\SIMPLE_SETUP.md": {
+    "mtime": 1782029359.1282082,
+    "ast_hash": "04d51d6662acf6497a6d54fe017c0736",
+    "semantic_hash": "04d51d6662acf6497a6d54fe017c0736"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\docs\\VPS.md": {
+    "mtime": 1781964125.895209,
+    "ast_hash": "4650fea5d29d8e66f679c4830898bcb3",
+    "semantic_hash": "4650fea5d29d8e66f679c4830898bcb3"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\docs\\VPS_NO_GUI.md": {
+    "mtime": 1782029359.1302073,
+    "ast_hash": "ef818b22560d0bb6145b9e5c1a86bae2",
+    "semantic_hash": "ef818b22560d0bb6145b9e5c1a86bae2"
+  },
+  "C:\\Users\\Mahna\\GoogleMEssage\\public\\dashboard\\index.html": {
+    "mtime": 1782051887.742495,
+    "ast_hash": "71f6f89bd6e80de77198d3946631d666",
+    "semantic_hash": "71f6f89bd6e80de77198d3946631d666"
+  }
+}
