@@ -827,6 +827,7 @@ app.get("/admin/overview", {
     response: {
       200: {
         type: "object",
+        additionalProperties: true,
         properties: {
           ok: { type: "boolean" },
           service: { type: "string" },
@@ -835,12 +836,13 @@ app.get("/admin/overview", {
           adminActionsEnabled: { type: "boolean" },
           readiness: {
             type: "object",
+            additionalProperties: true,
             properties: {
               ready: { type: "boolean" },
-              status: { type: "object" }
+              status: { type: "object", additionalProperties: true }
             }
           },
-          services: { type: "array", items: { type: "object" } }
+          services: { type: "array", items: { type: "object", additionalProperties: true } }
         }
       }
     }
@@ -848,11 +850,9 @@ app.get("/admin/overview", {
 }, async () => {
   let readiness;
   try {
-    let status = await client.status();
-    if (!status.paired && !status.qrVisible && !status.signInVisible) {
-      await client.listConversations(1).catch(() => {});
-      status = await client.status();
-    }
+    // Non-blocking: serves the cached pairing status so this endpoint never
+    // queues behind in-flight sends on the single browser lock.
+    const status = await client.statusForDashboard();
     readiness = { ready: status.paired, status };
   } catch (error) {
     readiness = { ready: false, error: error.message };
@@ -979,16 +979,13 @@ app.get("/ready", {
     description: "Returns 200 if Google Messages is paired and ready to send/receive. Returns 503 if not paired. Use this before calling `/send` to verify readiness.",
     tags: ["Session"],
     response: {
-      200: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object" } } },
-      503: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object" } } }
+      200: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object", additionalProperties: true } } },
+      503: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object", additionalProperties: true } } }
     }
   }
 }, async (request, reply) => {
-  let status = await client.status();
-  if (!status.paired && !status.qrVisible && !status.signInVisible) {
-    await client.listConversations(1).catch(() => {});
-    status = await client.status();
-  }
+  // Non-blocking: cached status so /ready stays fast during send bursts.
+  const status = await client.statusForDashboard();
   if (!status.paired) reply.code(503);
   return {
     ready: status.paired,

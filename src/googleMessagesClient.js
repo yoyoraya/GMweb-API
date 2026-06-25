@@ -18,6 +18,10 @@ class GoogleMessagesClient extends EventEmitter {
     this.actionLock = Promise.resolve();
     this.userActionInProgress = false;
     this.conversationCache = this.readConversationCache();
+    // Cached pairing status so dashboard/readiness endpoints don't have to
+    // acquire the (single) browser lock and queue behind in-flight sends.
+    this.lastStatus = null;
+    this.lastStatusAt = 0;
   }
 
   async start() {
@@ -116,7 +120,7 @@ class GoogleMessagesClient extends EventEmitter {
     const paired = (onConversationsPage || composeVisible || hasStartChatText) && !qrVisible;
     const needsSignIn = !paired && signInVisible;
 
-    return {
+    const result = {
       running: Boolean(this.page && !this.page.isClosed()),
       browserMode: this.config.browserMode,
       startedAt: this.startedAt,
@@ -127,6 +131,55 @@ class GoogleMessagesClient extends EventEmitter {
       signInVisible: needsSignIn,
       hint: this.buildStatusHint(bodyText, qrVisible, paired, needsSignIn)
     };
+    // Refresh the cache on every live status read (also done by the background
+    // poller every cycle), so cache stays warm without extra lock contention.
+    this.lastStatus = result;
+    this.lastStatusAt = Date.now();
+    return result;
+  }
+
+  // Last known status without touching the browser lock. null if never read.
+  cachedStatus() {
+    if (!this.lastStatus) return null;
+    return { ...this.lastStatus, cached: true, ageMs: Date.now() - this.lastStatusAt };
+  }
+
+  // status() that can never block the caller longer than `ms`. The underlying
+  // call keeps running (and will refresh the cache) even if we stop waiting.
+  statusWithTimeout(ms = 5000) {
+    return Promise.race([
+      this.status(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("status_timeout")), ms))
+    ]);
+  }
+
+  // Non-blocking status for dashboard/readiness. Serves a fresh-enough cache
+  // immediately; otherwise tries a time-boxed live read; otherwise stale cache.
+  async statusForDashboard({ maxAgeMs = 15000, timeoutMs = 5000 } = {}) {
+    const cached = this.cachedStatus();
+    if (cached) {
+      // Always answer instantly from cache so the dashboard never blocks behind
+      // in-flight sends. If the cache is getting old (the poller may be starved
+      // during a send burst), kick a background refresh for the next read.
+      if (cached.ageMs >= maxAgeMs) this.status().catch(() => {});
+      return cached.ageMs >= maxAgeMs ? { ...cached, stale: true } : cached;
+    }
+    // Cold start only (no cache yet): time-boxed live read, never hangs.
+    try {
+      return await this.statusWithTimeout(timeoutMs);
+    } catch {
+      return {
+        running: Boolean(this.page && !this.page.isClosed()),
+        browserMode: this.config.browserMode,
+        startedAt: this.startedAt,
+        url: "",
+        title: "",
+        paired: false,
+        qrVisible: false,
+        signInVisible: false,
+        hint: "status warming up (browser busy)"
+      };
+    }
   }
 
   buildStatusHint(bodyText, qrVisible, paired, signInVisible) {
