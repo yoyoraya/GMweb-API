@@ -22,6 +22,9 @@ class GoogleMessagesClient extends EventEmitter {
     // acquire the (single) browser lock and queue behind in-flight sends.
     this.lastStatus = null;
     this.lastStatusAt = 0;
+    // Hard cap on how long any single locked browser op may run. A wedged page
+    // can otherwise hold the lock forever and stall the whole send queue.
+    this.lockTimeoutMs = Number(config.lockTimeoutMs) || 70000;
   }
 
   async start() {
@@ -940,7 +943,7 @@ class GoogleMessagesClient extends EventEmitter {
     return false;
   }
 
-  async withBrowserLock(action) {
+  async withBrowserLock(action, { timeoutMs = this.lockTimeoutMs } = {}) {
     const previous = this.actionLock;
     let release;
     this.actionLock = new Promise((resolve) => {
@@ -949,10 +952,38 @@ class GoogleMessagesClient extends EventEmitter {
 
     await previous.catch(() => {});
     try {
-      return await action();
+      if (!timeoutMs) return await action();
+      // Watchdog: never hold the lock longer than timeoutMs. If the action
+      // wedges, reject so the lock frees and the queue keeps moving. The
+      // orphaned action is abandoned; the worker triggers recover() on repeated
+      // failures to rebuild a clean page.
+      let timer;
+      const guard = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("browser_lock_timeout")), timeoutMs);
+      });
+      try {
+        return await Promise.race([action(), guard]);
+      } finally {
+        clearTimeout(timer);
+      }
     } finally {
       release();
     }
+  }
+
+  // Drop the current (possibly wedged) page and reconnect to the external
+  // Chrome with a fresh Messages page. Does NOT kill the Chrome process.
+  async recover() {
+    return this.withBrowserLock(async () => {
+      this.stopPolling();
+      // In connect mode the browser process is owned by gmweb-chrome.service;
+      // just drop our refs and reconnect rather than closing it.
+      this.browser = null;
+      this.context = null;
+      this.page = null;
+      await this.startUnlocked();
+      return { recovered: true, at: new Date().toISOString() };
+    }, { timeoutMs: 60000 });
   }
 }
 

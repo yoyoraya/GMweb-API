@@ -408,11 +408,23 @@ client.on("conversation:changed", (event) => {
 client.on("error", (error) => app.log.warn({ error }, "client error"));
 
 // Queue worker: processes one send at a time using the shared browser.
+// Hard per-send timeout so a wedged page can never stall the queue, plus
+// auto-recovery (reconnect + fresh page) after consecutive failures.
+const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS) || 80000;
+const SEND_FAIL_RESTART_THRESHOLD = Number(process.env.SEND_FAIL_RESTART_THRESHOLD) || 3;
+let sendFailStreak = 0;
+let recovering = false;
+
 function startSendWorker() {
   sendQueue.startWorker(
     async (job) => {
       // Runs in-process; shares the single Playwright browser via withBrowserLock.
-      return client.sendMessage({ to: job.data.to, text: job.data.text });
+      const result = await Promise.race([
+        client.sendMessage({ to: job.data.to, text: job.data.text }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("send_timeout")), SEND_TIMEOUT_MS))
+      ]);
+      sendFailStreak = 0; // a success clears the streak
+      return result;
     },
     {
       onActive: (job) => emitSse({
@@ -447,6 +459,22 @@ function startSendWorker() {
         };
         emitSse(event);
         postWebhook(event);
+
+        // Auto-recover the browser after repeated failures (likely a wedged
+        // page). Reconnects and loads a fresh Messages page without killing
+        // the external Chrome. Only counts terminal failures (no more retries).
+        const willRetry = attemptsMade < maxAttempts;
+        if (!willRetry) sendFailStreak += 1;
+        if (sendFailStreak >= SEND_FAIL_RESTART_THRESHOLD && !recovering) {
+          recovering = true;
+          sendFailStreak = 0;
+          app.log.warn(`auto-recovering browser after ${SEND_FAIL_RESTART_THRESHOLD} consecutive send failures`);
+          emitSse({ type: "browser_recovering", at: new Date().toISOString() });
+          client.recover()
+            .then(() => app.log.info("browser recover complete"))
+            .catch((e) => app.log.warn({ e }, "browser recover failed"))
+            .finally(() => { recovering = false; });
+        }
       },
       onError: (err) => app.log.warn({ err }, "send worker error")
     }
