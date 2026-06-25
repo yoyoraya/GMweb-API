@@ -1266,6 +1266,15 @@ app.post("/send", {
       },
       examples: [{ to: "+989121234567", text: "Hello from GMweb API!", priority: "high" }]
     },
+    headers: {
+      type: "object",
+      properties: {
+        "idempotency-key": {
+          type: "string",
+          description: "Optional. A unique id for this send. Retrying with the same key returns the original `jobId` instead of sending a duplicate (kept 24h). Reusing a key with a different `to`/`text` returns 409."
+        }
+      }
+    },
     response: {
       202: {
         type: "object",
@@ -1275,16 +1284,26 @@ app.post("/send", {
           jobId: { type: "string" },
           status: { type: "string", enum: ["queued"] },
           priority: { type: "string", enum: ["high", "normal"] },
+          deduped: { type: "boolean", description: "True if this returned an existing job for a repeated Idempotency-Key." },
           queuePosition: { type: "integer", description: "Approximate number of jobs ahead (incl. active). ~0 for high priority." }
+        }
+      },
+      409: {
+        type: "object",
+        description: "Idempotency-Key reused with different content",
+        properties: {
+          error: { type: "string", enum: ["idempotency_key_reused"] },
+          message: { type: "string" }
         }
       },
       200: {
         type: "object",
-        description: "Returned only when wait=true and the send succeeded",
+        description: "Returned when wait=true and the send succeeded, or for a deduped Idempotency-Key whose job already completed",
         properties: {
           ok: { type: "boolean" },
           jobId: { type: "string" },
           status: { type: "string", enum: ["completed"] },
+          deduped: { type: "boolean" },
           result: { type: "object" }
         }
       },
@@ -1348,10 +1367,46 @@ app.post("/send", {
     ? { lifo: true }
     : (typeof priority === "number" ? { priority } : {});
 
-  const job = await sendQueue.enqueue(
-    { to, text, keyId: projectKey?.id || null, keyName: projectKey?.name || "master" },
-    enqueueOpts
-  );
+  // Idempotency: if the caller sends an `Idempotency-Key` header, dedupe retries
+  // so a network blip doesn't send the SMS twice. Same key -> original jobId.
+  const idemKey = String(request.headers["idempotency-key"] || "").trim().slice(0, 200) || null;
+  const bodyHash = idemKey ? crypto.createHash("sha256").update(`${to}\n${text}`).digest("hex").slice(0, 16) : null;
+  if (idemKey) {
+    const reserved = await sendQueue.reserveIdempotency(idemKey, bodyHash).catch(() => "OK");
+    if (reserved !== "OK") {
+      // Duplicate. Wait briefly if the first request is still reserving, then
+      // return the original job (or 409 if the key was reused with new content).
+      let rec = await sendQueue.getIdempotency(idemKey);
+      for (let i = 0; i < 20 && rec && rec.pending; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        rec = await sendQueue.getIdempotency(idemKey);
+      }
+      if (rec && rec.bodyHash !== bodyHash) {
+        reply.code(409).send({ error: "idempotency_key_reused", message: "This Idempotency-Key was already used with a different to/text." });
+        return;
+      }
+      if (rec && rec.jobId) {
+        const st = await sendQueue.jobStatus(rec.jobId).catch(() => null);
+        const done = st?.state === "completed";
+        reply.code(done ? 200 : 202);
+        return { ok: true, jobId: rec.jobId, status: done ? "completed" : "queued", priority: highPriority ? "high" : "normal", deduped: true };
+      }
+      // Original job expired/purged — re-reserve and fall through to send fresh.
+      await sendQueue.reserveIdempotency(idemKey, bodyHash).catch(() => {});
+    }
+  }
+
+  let job;
+  try {
+    job = await sendQueue.enqueue(
+      { to, text, keyId: projectKey?.id || null, keyName: projectKey?.name || "master" },
+      enqueueOpts
+    );
+  } catch (error) {
+    if (idemKey) await sendQueue.releaseIdempotency(idemKey);
+    throw error;
+  }
+  if (idemKey) await sendQueue.setIdempotencyJob(idemKey, job.id, bodyHash).catch(() => {});
   emitSse({ type: "send_queued", jobId: job.id, to, priority: highPriority ? "high" : "normal", at: new Date().toISOString() });
 
   if (wait) {

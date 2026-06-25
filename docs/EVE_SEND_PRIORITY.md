@@ -121,6 +121,40 @@ Authorization: Bearer {API_KEY}
   next, so the customer who just paid gets their confirmation immediately even
   mid-campaign.
 
+---
+
+## Idempotency (avoid duplicate SMS on retry)
+
+If a `POST /send` times out or the network blips, Eve may retry — which could
+send the SMS twice. To prevent that, send an **`Idempotency-Key`** header: a
+unique id Eve generates per logical message (e.g. a UUID, or
+`renewal-<userId>-<timestamp>`).
+
+```bash
+curl -X POST {BASE}/send \
+  -H "Authorization: Bearer {API_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: renewal-8842-1782390000" \
+  -d '{ "to": "+989121234567", "text": "تمدید شد ✅", "priority": "high" }'
+```
+
+Behavior:
+- **First request** with a given key → enqueues normally, returns its `jobId`.
+- **Retry with the same key + same `to`/`text`** → returns the **original
+  `jobId`** with `"deduped": true`. No second SMS is queued.
+- **Same key but different `to`/`text`** → `409 { "error": "idempotency_key_reused" }`
+  (the key must identify one specific message).
+- Keys are remembered for **24h**.
+
+```jsonc
+// retry response (deduped)
+{ "ok": true, "jobId": "413", "status": "queued", "priority": "high", "deduped": true }
+```
+
+**Eve should generate one stable key per message and reuse it only when
+retrying that exact message.** Optional but strongly recommended for renewals
+and any send Eve might retry.
+
 ### Notes / limits
 
 - **Throughput is bounded by one browser.** High priority changes *order*, not
@@ -128,6 +162,4 @@ Authorization: Bearer {API_KEY}
   time; just before the normal ones.
 - **Rate limit:** the `eve` key is currently unlimited. If a per-key limit is
   re-enabled later, a `429` carries a `Retry-After` header — wait that long.
-- **No idempotency key yet.** If a `POST /send` times out on the network, retry
-  may create a duplicate. (Ask if you want an `Idempotency-Key` header added.)
 - **Timestamps** are ISO-8601 UTC (`...Z`).
