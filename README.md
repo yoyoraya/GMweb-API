@@ -114,6 +114,35 @@ Operations notes: [docs/OPERATIONS.md](docs/OPERATIONS.md)
 
 Simple setup path: [docs/SIMPLE_SETUP.md](docs/SIMPLE_SETUP.md)
 
+## One-command install (Ubuntu 22.04)
+
+The fastest way to stand up a server. A single menu-driven script installs every
+dependency (Chrome, Redis, VNC, Node), configures systemd services + a self-healing
+watchdog + log rotation, generates credentials, and walks you through pairing
+Google Messages — then lets you secure, monitor, update, or fully remove it.
+
+```bash
+# from a cloned repo:
+sudo bash install/quick-install.sh
+
+# or straight from GitHub (it clones into /opt/gmweb-api):
+curl -fsSL https://raw.githubusercontent.com/yoyoraya/GMweb-API/main/install/quick-install.sh | sudo bash
+```
+
+It drops a `gmweb-install` command so you can re-open the menu anytime:
+
+```text
+1) Quick install / repair     5) Security (firewall, rotate token, audit)
+2) Pairing wizard             6) Public dashboard (HTTPS)
+3) Services (start/stop/VNC)  7) Update from git
+4) Logs & monitoring          8) Uninstall (incl. full purge + self-delete)
+```
+
+A `gmweb-monitor.timer` runs every 2 minutes: it checks `/health` and `/ready`
+and auto-restarts Chrome + API if the Google Messages session wedges (e.g. a
+Google cookie-rotation that outlasts the in-app retry). Logs land in
+`/var/log/gmweb/` (rotated weekly).
+
 ## VPS Manager
 
 The Ubuntu installer adds a server-side manager command:
