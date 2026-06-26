@@ -91,6 +91,52 @@ class SendQueue {
     return this.queue.getJobCounts("waiting", "active", "completed", "failed", "delayed");
   }
 
+  // List jobs (newest first) for the dashboard queue panel. Returns a light
+  // shape — no full message body, just a preview.
+  async listJobs({ states = ["active", "waiting", "delayed"], limit = 100 } = {}) {
+    const jobs = await this.queue.getJobs(states, 0, Math.max(0, limit - 1), false);
+    const out = [];
+    for (const job of jobs) {
+      if (!job) continue;
+      const state = await job.getState().catch(() => "unknown");
+      out.push({
+        id: job.id,
+        state,
+        to: job.data?.to || null,
+        textPreview: String(job.data?.text || "").replace(/\s+/g, " ").slice(0, 80),
+        keyName: job.data?.keyName || null,
+        priority: job.opts?.lifo ? "high" : "normal",
+        attemptsMade: job.attemptsMade || 0,
+        createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null
+      });
+    }
+    return out;
+  }
+
+  // Bump a waiting/delayed job to the front of the line (processed next). The
+  // worker pops from the tail, so re-adding with lifo puts it at the tail.
+  // Returns the new job id, or null if the job is gone / already running.
+  async promoteJob(id) {
+    const job = await this.queue.getJob(id);
+    if (!job) return null;
+    const state = await job.getState().catch(() => "unknown");
+    if (state !== "waiting" && state !== "delayed") {
+      return { promoted: false, reason: `job is ${state}`, state };
+    }
+    const data = job.data;
+    await job.remove();
+    const fresh = await this.queue.add("send", data, { lifo: true });
+    return { promoted: true, id: fresh.id, previousId: String(id), state: "waiting" };
+  }
+
+  // Remove a job from the queue (cancel a pending send).
+  async removeJob(id) {
+    const job = await this.queue.getJob(id);
+    if (!job) return false;
+    await job.remove();
+    return true;
+  }
+
   // Block until a job finishes (used by /send?wait=true). Throws on failure/timeout.
   waitForJob(job, timeoutMs = 90000) {
     return job.waitUntilFinished(this.events, timeoutMs);

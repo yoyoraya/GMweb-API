@@ -171,6 +171,7 @@ async function login(token) {
   showApp(true);
   await refreshOverview();
   loadConversations();
+  loadQueue();
   connectSSE();
 }
 
@@ -212,6 +213,7 @@ async function restoreSession() {
     showApp(true);
     await refreshOverview();
     loadConversations();
+    loadQueue();
     connectSSE();
     return true;
   }
@@ -659,6 +661,94 @@ async function loadApiLogs() {
   }
 }
 
+// ── Send queue panel ──────────────────────────────────────────────────────────
+
+async function loadQueue() {
+  const list = $("#queueList");
+  try {
+    const [counts, jobsData] = await Promise.all([
+      api("/admin/queue", { headers: { "Content-Type": "text/plain" } }),
+      api("/admin/queue/jobs?limit=100", { headers: { "Content-Type": "text/plain" } })
+    ]);
+    const c = counts.counts || {};
+    $("#queueStats").textContent =
+      `${c.waiting || 0} waiting · ${c.active || 0} active · ${c.failed || 0} failed`;
+
+    const jobs = jobsData.jobs || [];
+    list.replaceChildren();
+    if (!jobs.length) {
+      const empty = document.createElement("div");
+      empty.style.cssText = "padding:16px;color:var(--muted);font-size:13px";
+      empty.textContent = "Queue is empty.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const job of jobs) {
+      const row = document.createElement("div");
+      row.className = "queueRow";
+
+      const badge = document.createElement("span");
+      badge.className = "qPriority " + (job.priority === "high" ? "qHigh" : "qNormal");
+      badge.textContent = job.priority === "high" ? "HIGH" : job.state;
+      row.appendChild(badge);
+
+      const body = document.createElement("div");
+      body.className = "qBody";
+      const to = document.createElement("strong");
+      to.textContent = job.to || "—";
+      const txt = document.createElement("span");
+      txt.className = "qText";
+      txt.textContent = job.textPreview || "";
+      const meta = document.createElement("small");
+      meta.className = "qMeta";
+      const when = job.createdAt ? new Date(job.createdAt).toLocaleTimeString() : "";
+      meta.textContent = `${job.keyName || "—"} · ${when}${job.attemptsMade ? ` · try ${job.attemptsMade}` : ""}`;
+      body.append(to, txt, meta);
+      row.appendChild(body);
+
+      const actions = document.createElement("div");
+      actions.className = "qActions";
+      const up = document.createElement("button");
+      up.className = "secondary";
+      up.textContent = "⬆ High";
+      up.title = "Process this next, ahead of the queue";
+      up.disabled = job.priority === "high" || job.state === "active";
+      up.addEventListener("click", () => promoteJob(job.id));
+      const del = document.createElement("button");
+      del.className = "ghost";
+      del.textContent = "✕";
+      del.title = "Cancel this send";
+      del.disabled = job.state === "active";
+      del.addEventListener("click", () => cancelJob(job.id));
+      actions.append(up, del);
+      row.appendChild(actions);
+
+      list.appendChild(row);
+    }
+  } catch (error) {
+    list.textContent = error.message;
+  }
+}
+
+async function promoteJob(id) {
+  try {
+    await api(`/admin/queue/jobs/${id}/promote`, { method: "POST" });
+    loadQueue();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function cancelJob(id) {
+  if (!confirm("Cancel this queued message?")) return;
+  try {
+    await api(`/admin/queue/jobs/${id}`, { method: "DELETE" });
+    loadQueue();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 function bind() {
@@ -745,6 +835,7 @@ function bind() {
     });
   });
   $("#refreshLogsBtn").addEventListener("click", loadApiLogs);
+  $("#refreshQueueBtn").addEventListener("click", loadQueue);
 
   // Toggle API Keys section visibility and load data
   $$(".nav a").forEach((link) => {
@@ -781,6 +872,7 @@ restoreSession().then((ok) => {
 setInterval(() => {
   if (state.csrfToken) {
     refreshOverview().catch(() => {});
+    loadQueue().catch(() => {});
     if (!currentPanelItem) loadConversations(true).catch(() => {});
   }
 }, 8000);

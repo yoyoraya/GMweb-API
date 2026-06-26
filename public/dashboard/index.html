@@ -50,6 +50,7 @@
         <nav class="nav">
           <a href="#overview" class="active">Overview</a>
           <a href="#send">Send</a>
+          <a href="#queue">Queue</a>
           <a href="#conversations">Conversations</a>
           <a href="#apikeys">API Keys</a>
           <a href="#vnc">VNC</a>
@@ -146,6 +147,17 @@
                   </label>
                   <button type="submit" class="primary">Send</button>
                 </form>
+              </section>
+
+              <section id="queue" class="panel">
+                <div class="panelHead">
+                  <h2>Send Queue</h2>
+                  <div class="topActions">
+                    <span id="queueStats" class="pill">-</span>
+                    <button id="refreshQueueBtn" class="secondary">Refresh</button>
+                  </div>
+                </div>
+                <div id="queueList" class="queueList"></div>
               </section>
 
               <section id="conversations" class="panel">

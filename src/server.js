@@ -1490,6 +1490,72 @@ app.get("/admin/queue", {
   }
 }, async () => ({ counts: await sendQueue.counts() }));
 
+app.get("/admin/queue/jobs", {
+  schema: {
+    summary: "List queued send jobs",
+    description: "Returns pending send jobs (active, waiting, delayed) newest-first, with a text preview and priority. Use to drive a queue panel. **Master token only.**",
+    tags: ["Admin"],
+    querystring: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 500, default: 100 }
+      }
+    },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          jobs: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                state: { type: "string" },
+                to: { type: ["string", "null"] },
+                textPreview: { type: "string" },
+                keyName: { type: ["string", "null"] },
+                priority: { type: "string", enum: ["high", "normal"] },
+                attemptsMade: { type: "integer" },
+                createdAt: { type: ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}, async (request) => {
+  const limit = parseLimit(request.query.limit, 100, 500);
+  return { jobs: await sendQueue.listJobs({ limit }) };
+});
+
+app.post("/admin/queue/jobs/:id/promote", {
+  schema: {
+    summary: "Bump a job to high priority",
+    description: "Moves a waiting/delayed send job to the front of the queue so it is processed next, ahead of all other waiting messages. **Master token only.**",
+    tags: ["Admin"],
+    params: { type: "object", properties: { id: { type: "string" } } }
+  }
+}, async (request, reply) => {
+  const result = await sendQueue.promoteJob(request.params.id);
+  if (!result) { reply.code(404).send({ error: "not_found" }); return; }
+  return { ok: true, ...result };
+});
+
+app.delete("/admin/queue/jobs/:id", {
+  schema: {
+    summary: "Cancel a queued job",
+    description: "Removes a pending send job from the queue. **Master token only.**",
+    tags: ["Admin"],
+    params: { type: "object", properties: { id: { type: "string" } } }
+  }
+}, async (request, reply) => {
+  const ok = await sendQueue.removeJob(request.params.id);
+  if (!ok) { reply.code(404).send({ error: "not_found" }); return; }
+  return { ok: true };
+});
+
 // ─── API Key Management (master / dashboard only) ────────────────────────────
 
 app.get("/admin/api-keys", {
