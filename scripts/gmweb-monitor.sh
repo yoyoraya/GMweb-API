@@ -24,6 +24,16 @@ BASE="http://127.0.0.1:${PORT}"
 count="$(cat "$STATE" 2>/dev/null || echo 0)"
 [[ "$count" =~ ^[0-9]+$ ]] || count=0
 
+# Belt-and-suspenders: close Google's RotateCookiesPage tab via CDP. The app
+# already does this every few seconds; this catches the case where the app
+# itself is wedged. Needs jq + the CDP port (9222).
+CDP_PORT="$(grep -m1 '^BROWSER_CDP_URL=' "$APP_DIR/.env" 2>/dev/null | grep -oE '[0-9]+$' || echo 9222)"
+if command -v jq >/dev/null 2>&1; then
+  for id in $(curl -fsS -m 5 "http://127.0.0.1:${CDP_PORT}/json" 2>/dev/null | jq -r '.[] | select(.url|test("RotateCookies")) | .id' 2>/dev/null); do
+    curl -fsS -m 5 "http://127.0.0.1:${CDP_PORT}/json/close/$id" >/dev/null 2>&1 && log "closed RotateCookiesPage tab $id"
+  done
+fi
+
 # 1) Is the API process answering at all?
 if ! curl -fsS -m 8 "$BASE/health" >/dev/null 2>&1; then
   log "health DOWN -> restarting gmweb-api"

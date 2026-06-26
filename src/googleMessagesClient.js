@@ -28,6 +28,12 @@ class GoogleMessagesClient extends EventEmitter {
     // How long ensurePaired() will wait through transient Google cookie-rotation
     // before giving up. Kept well under lockTimeoutMs so the watchdog still fires.
     this.pairedWaitMs = Number(config.pairedWaitMs) || 20000;
+    // Background guard that closes Google's accounts.google.com/RotateCookiesPage
+    // tab. When that tab's cookie rotation loops/stalls it wedges the whole
+    // Messages session (page spins, every send hangs ~80s). Closing it keeps the
+    // main page alive. Runs off the browser lock — it only touches OTHER pages.
+    this.rotationTimer = null;
+    this.rotationGuardMs = Number(config.rotationGuardMs) || 3000;
   }
 
   async start() {
@@ -58,12 +64,14 @@ class GoogleMessagesClient extends EventEmitter {
       this.page = null;
       this.context = null;
       this.stopPolling();
+      this.stopRotationGuard();
     });
     this.browser?.on("disconnected", () => {
       this.browser = null;
       this.page = null;
       this.context = null;
       this.stopPolling();
+      this.stopRotationGuard();
     });
 
     this.page = this.context.pages()[0] || await this.context.newPage();
@@ -72,6 +80,7 @@ class GoogleMessagesClient extends EventEmitter {
     await this.page.waitForLoadState("domcontentloaded").catch(() => {});
     this.startedAt = new Date().toISOString();
     this.startPolling();
+    this.startRotationGuard();
     return this.page;
   }
 
@@ -81,6 +90,7 @@ class GoogleMessagesClient extends EventEmitter {
 
   async stopUnlocked() {
     this.stopPolling();
+    this.stopRotationGuard();
     if (this.config.browserMode === "connect") {
       if (this.browser) await this.browser.close();
     } else if (this.context) {
@@ -552,6 +562,7 @@ class GoogleMessagesClient extends EventEmitter {
   }
 
   async ensurePaired() {
+    await this.closeRotationTabs().catch(() => {});
     const deadline = Date.now() + this.pairedWaitMs;
     let status = await this.statusUnlocked();
     while (!status.paired) {
@@ -882,6 +893,47 @@ class GoogleMessagesClient extends EventEmitter {
     if (!this.pollTimer) return;
     clearInterval(this.pollTimer);
     this.pollTimer = null;
+  }
+
+  // Close Google's accounts.google.com/RotateCookiesPage tab(s). That tab is
+  // opened by Google to rotate session cookies; when its rotation stalls it
+  // wedges the Messages session (page spins, sends hang). We don't need it —
+  // closing it lets the main page keep working. Touches only OTHER pages, so it
+  // is safe to run without the browser lock.
+  async closeRotationTabs() {
+    const browser = this.browser;
+    const context = this.context;
+    if (!browser && !context) return 0;
+    const contexts = browser ? browser.contexts() : [context];
+    let closed = 0;
+    for (const ctx of contexts) {
+      let pages = [];
+      try { pages = ctx.pages(); } catch { continue; }
+      for (const pg of pages) {
+        if (pg === this.page) continue;
+        let url = "";
+        try { url = pg.url() || ""; } catch { continue; }
+        if (/accounts\.google\.com\/RotateCookies/i.test(url)) {
+          await pg.close().catch(() => {});
+          closed += 1;
+        }
+      }
+    }
+    return closed;
+  }
+
+  startRotationGuard() {
+    if (this.rotationTimer || this.rotationGuardMs <= 0) return;
+    this.rotationTimer = setInterval(() => {
+      this.closeRotationTabs().catch(() => {});
+    }, this.rotationGuardMs);
+    this.rotationTimer.unref?.();
+  }
+
+  stopRotationGuard() {
+    if (!this.rotationTimer) return;
+    clearInterval(this.rotationTimer);
+    this.rotationTimer = null;
   }
 
   async pollConversations() {
