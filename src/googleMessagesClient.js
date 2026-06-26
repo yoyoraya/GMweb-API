@@ -25,6 +25,9 @@ class GoogleMessagesClient extends EventEmitter {
     // Hard cap on how long any single locked browser op may run. A wedged page
     // can otherwise hold the lock forever and stall the whole send queue.
     this.lockTimeoutMs = Number(config.lockTimeoutMs) || 70000;
+    // How long ensurePaired() will wait through transient Google cookie-rotation
+    // before giving up. Kept well under lockTimeoutMs so the watchdog still fires.
+    this.pairedWaitMs = Number(config.pairedWaitMs) || 20000;
   }
 
   async start() {
@@ -549,7 +552,22 @@ class GoogleMessagesClient extends EventEmitter {
   }
 
   async ensurePaired() {
-    const status = await this.statusUnlocked();
+    const deadline = Date.now() + this.pairedWaitMs;
+    let status = await this.statusUnlocked();
+    while (!status.paired) {
+      // Real blockers waiting can't fix → fail fast so the caller re-pairs.
+      if (status.qrVisible || status.signInVisible) break;
+      if (Date.now() >= deadline) break;
+      // Transient: Google cookie rotation (accounts.google.com / RotateCookiesPage)
+      // or a mid-load page where the composer hasn't rendered yet. Don't fail the
+      // send — nudge back to conversations if parked on auth, then re-check. This
+      // is what stops a brief rotation from draining the whole queue into failures.
+      if (/accounts\.google\.com|RotateCookies/i.test(status.url)) {
+        await this.page.goto(`${MESSAGES_URL}/conversations`, { waitUntil: "domcontentloaded" }).catch(() => {});
+      }
+      await this.page.waitForTimeout(1000).catch(() => {});
+      status = await this.statusUnlocked();
+    }
     if (!status.paired) {
       const error = new Error(`Google Messages is not ready: ${status.hint}`);
       error.statusCode = 409;
