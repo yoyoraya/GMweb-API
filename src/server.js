@@ -408,11 +408,23 @@ client.on("conversation:changed", (event) => {
 client.on("error", (error) => app.log.warn({ error }, "client error"));
 
 // Queue worker: processes one send at a time using the shared browser.
+// Hard per-send timeout so a wedged page can never stall the queue, plus
+// auto-recovery (reconnect + fresh page) after consecutive failures.
+const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS) || 80000;
+const SEND_FAIL_RESTART_THRESHOLD = Number(process.env.SEND_FAIL_RESTART_THRESHOLD) || 3;
+let sendFailStreak = 0;
+let recovering = false;
+
 function startSendWorker() {
   sendQueue.startWorker(
     async (job) => {
       // Runs in-process; shares the single Playwright browser via withBrowserLock.
-      return client.sendMessage({ to: job.data.to, text: job.data.text });
+      const result = await Promise.race([
+        client.sendMessage({ to: job.data.to, text: job.data.text }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("send_timeout")), SEND_TIMEOUT_MS))
+      ]);
+      sendFailStreak = 0; // a success clears the streak
+      return result;
     },
     {
       onActive: (job) => emitSse({
@@ -447,6 +459,22 @@ function startSendWorker() {
         };
         emitSse(event);
         postWebhook(event);
+
+        // Auto-recover the browser after repeated failures (likely a wedged
+        // page). Reconnects and loads a fresh Messages page without killing
+        // the external Chrome. Only counts terminal failures (no more retries).
+        const willRetry = attemptsMade < maxAttempts;
+        if (!willRetry) sendFailStreak += 1;
+        if (sendFailStreak >= SEND_FAIL_RESTART_THRESHOLD && !recovering) {
+          recovering = true;
+          sendFailStreak = 0;
+          app.log.warn(`auto-recovering browser after ${SEND_FAIL_RESTART_THRESHOLD} consecutive send failures`);
+          emitSse({ type: "browser_recovering", at: new Date().toISOString() });
+          client.recover()
+            .then(() => app.log.info("browser recover complete"))
+            .catch((e) => app.log.warn({ e }, "browser recover failed"))
+            .finally(() => { recovering = false; });
+        }
       },
       onError: (err) => app.log.warn({ err }, "send worker error")
     }
@@ -832,6 +860,7 @@ app.get("/admin/overview", {
     response: {
       200: {
         type: "object",
+        additionalProperties: true,
         properties: {
           ok: { type: "boolean" },
           service: { type: "string" },
@@ -840,12 +869,13 @@ app.get("/admin/overview", {
           adminActionsEnabled: { type: "boolean" },
           readiness: {
             type: "object",
+            additionalProperties: true,
             properties: {
               ready: { type: "boolean" },
-              status: { type: "object" }
+              status: { type: "object", additionalProperties: true }
             }
           },
-          services: { type: "array", items: { type: "object" } }
+          services: { type: "array", items: { type: "object", additionalProperties: true } }
         }
       }
     }
@@ -853,11 +883,9 @@ app.get("/admin/overview", {
 }, async () => {
   let readiness;
   try {
-    let status = await client.status();
-    if (!status.paired && !status.qrVisible && !status.signInVisible) {
-      await client.listConversations(1).catch(() => {});
-      status = await client.status();
-    }
+    // Non-blocking: serves the cached pairing status so this endpoint never
+    // queues behind in-flight sends on the single browser lock.
+    const status = await client.statusForDashboard();
     readiness = { ready: status.paired, status };
   } catch (error) {
     readiness = { ready: false, error: error.message };
@@ -984,16 +1012,13 @@ app.get("/ready", {
     description: "Returns 200 if Google Messages is paired and ready to send/receive. Returns 503 if not paired. Use this before calling `/send` to verify readiness.",
     tags: ["Session"],
     response: {
-      200: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object" } } },
-      503: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object" } } }
+      200: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object", additionalProperties: true } } },
+      503: { type: "object", properties: { ready: { type: "boolean" }, status: { type: "object", additionalProperties: true } } }
     }
   }
 }, async (request, reply) => {
-  let status = await client.status();
-  if (!status.paired && !status.qrVisible && !status.signInVisible) {
-    await client.listConversations(1).catch(() => {});
-    status = await client.status();
-  }
+  // Non-blocking: cached status so /ready stays fast during send bursts.
+  const status = await client.statusForDashboard();
   if (!status.paired) reply.code(503);
   return {
     ready: status.paired,
@@ -1221,6 +1246,12 @@ app.post("/send", {
       "**Synchronous mode:** pass `\"wait\": true` to block until the send finishes",
       "(up to 90s) and receive the result directly. Use only for low-volume callers.",
       "",
+      "**Priority:** pass `\"priority\": \"high\"` to jump the queue. A high-priority",
+      "message is processed **next** (right after the send already in flight finishes),",
+      "ahead of every normal-priority message still waiting — then the queue/campaign",
+      "continues as before. Use it for time-sensitive transactional messages (e.g. a",
+      "renewal confirmation) so they aren't stuck behind a bulk reminder campaign.",
+      "",
       "**Rate limits (project keys):** configurable per-minute and per-hour (default 10/min, 100/hr).",
       "",
       "**Phone format:** include country code, e.g. `+989121234567`."
@@ -1233,9 +1264,21 @@ app.post("/send", {
         to: { type: "string", minLength: 3, maxLength: 32, description: "Recipient phone number with country code, e.g. `+989121234567`" },
         text: { type: "string", minLength: 1, maxLength: 4000, description: "Message content. Plain text only." },
         wait: { type: "boolean", default: false, description: "If true, block until the send completes (max 90s) and return the result." },
-        priority: { type: "integer", minimum: 1, maximum: 10, description: "Job priority (1 = highest). Lower numbers are processed first." }
+        priority: {
+          type: ["string", "integer"],
+          description: "Send priority. Use the string `\"high\"` to jump the queue (processed next, ahead of all waiting normal messages); omit or `\"normal\"` for FIFO. A numeric 1-10 is also accepted (1-3 = high)."
+        }
       },
-      examples: [{ to: "+989121234567", text: "Hello from GMweb API!" }]
+      examples: [{ to: "+989121234567", text: "Hello from GMweb API!", priority: "high" }]
+    },
+    headers: {
+      type: "object",
+      properties: {
+        "idempotency-key": {
+          type: "string",
+          description: "Optional. A unique id for this send. Retrying with the same key returns the original `jobId` instead of sending a duplicate (kept 24h). Reusing a key with a different `to`/`text` returns 409."
+        }
+      }
     },
     response: {
       202: {
@@ -1245,16 +1288,27 @@ app.post("/send", {
           ok: { type: "boolean" },
           jobId: { type: "string" },
           status: { type: "string", enum: ["queued"] },
-          queuePosition: { type: "integer", description: "Approximate number of jobs ahead (incl. active)" }
+          priority: { type: "string", enum: ["high", "normal"] },
+          deduped: { type: "boolean", description: "True if this returned an existing job for a repeated Idempotency-Key." },
+          queuePosition: { type: "integer", description: "Approximate number of jobs ahead (incl. active). ~0 for high priority." }
+        }
+      },
+      409: {
+        type: "object",
+        description: "Idempotency-Key reused with different content",
+        properties: {
+          error: { type: "string", enum: ["idempotency_key_reused"] },
+          message: { type: "string" }
         }
       },
       200: {
         type: "object",
-        description: "Returned only when wait=true and the send succeeded",
+        description: "Returned when wait=true and the send succeeded, or for a deduped Idempotency-Key whose job already completed",
         properties: {
           ok: { type: "boolean" },
           jobId: { type: "string" },
           status: { type: "string", enum: ["completed"] },
+          deduped: { type: "boolean" },
           result: { type: "object" }
         }
       },
@@ -1300,7 +1354,7 @@ app.post("/send", {
     to: z.string().min(3).max(32),
     text: z.string().min(1).max(4000),
     wait: z.boolean().optional(),
-    priority: z.number().int().min(1).max(10).optional()
+    priority: z.union([z.enum(["high", "normal"]), z.number().int().min(1).max(10)]).optional()
   });
   const parsed = schema.safeParse(request.body);
   if (!parsed.success) {
@@ -1309,11 +1363,56 @@ app.post("/send", {
   }
   const { to, text, wait, priority } = parsed.data;
 
-  const job = await sendQueue.enqueue(
-    { to, text, keyId: projectKey?.id || null, keyName: projectKey?.name || "master" },
-    priority ? { priority } : {}
-  );
-  emitSse({ type: "send_queued", jobId: job.id, to, at: new Date().toISOString() });
+  // High priority -> lifo: BullMQ adds the job to the tail of the wait list,
+  // which the worker pops next (it consumes from the tail). So a high-priority
+  // message runs right after the in-flight send, ahead of all waiting normal
+  // messages, then the campaign continues. A numeric priority <=3 is also "high".
+  const highPriority = priority === "high" || (typeof priority === "number" && priority <= 3);
+  const enqueueOpts = highPriority
+    ? { lifo: true }
+    : (typeof priority === "number" ? { priority } : {});
+
+  // Idempotency: if the caller sends an `Idempotency-Key` header, dedupe retries
+  // so a network blip doesn't send the SMS twice. Same key -> original jobId.
+  const idemKey = String(request.headers["idempotency-key"] || "").trim().slice(0, 200) || null;
+  const bodyHash = idemKey ? crypto.createHash("sha256").update(`${to}\n${text}`).digest("hex").slice(0, 16) : null;
+  if (idemKey) {
+    const reserved = await sendQueue.reserveIdempotency(idemKey, bodyHash).catch(() => "OK");
+    if (reserved !== "OK") {
+      // Duplicate. Wait briefly if the first request is still reserving, then
+      // return the original job (or 409 if the key was reused with new content).
+      let rec = await sendQueue.getIdempotency(idemKey);
+      for (let i = 0; i < 20 && rec && rec.pending; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        rec = await sendQueue.getIdempotency(idemKey);
+      }
+      if (rec && rec.bodyHash !== bodyHash) {
+        reply.code(409).send({ error: "idempotency_key_reused", message: "This Idempotency-Key was already used with a different to/text." });
+        return;
+      }
+      if (rec && rec.jobId) {
+        const st = await sendQueue.jobStatus(rec.jobId).catch(() => null);
+        const done = st?.state === "completed";
+        reply.code(done ? 200 : 202);
+        return { ok: true, jobId: rec.jobId, status: done ? "completed" : "queued", priority: highPriority ? "high" : "normal", deduped: true };
+      }
+      // Original job expired/purged — re-reserve and fall through to send fresh.
+      await sendQueue.reserveIdempotency(idemKey, bodyHash).catch(() => {});
+    }
+  }
+
+  let job;
+  try {
+    job = await sendQueue.enqueue(
+      { to, text, keyId: projectKey?.id || null, keyName: projectKey?.name || "master" },
+      enqueueOpts
+    );
+  } catch (error) {
+    if (idemKey) await sendQueue.releaseIdempotency(idemKey);
+    throw error;
+  }
+  if (idemKey) await sendQueue.setIdempotencyJob(idemKey, job.id, bodyHash).catch(() => {});
+  emitSse({ type: "send_queued", jobId: job.id, to, priority: highPriority ? "high" : "normal", at: new Date().toISOString() });
 
   if (wait) {
     try {
@@ -1331,7 +1430,8 @@ app.post("/send", {
     ok: true,
     jobId: job.id,
     status: "queued",
-    queuePosition: (counts.waiting || 0) + (counts.active || 0)
+    priority: highPriority ? "high" : "normal",
+    queuePosition: highPriority ? (counts.active || 0) : (counts.waiting || 0) + (counts.active || 0)
   };
 });
 

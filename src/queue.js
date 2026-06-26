@@ -30,6 +30,41 @@ class SendQueue {
     return this.queue.add("send", data, opts);
   }
 
+  // --- Idempotency (dedupe POST /send retries) ---------------------------
+  // Backed by the same Redis as the queue. A key reserves an in-flight send;
+  // once enqueued we store the jobId so a retry returns the original job.
+  async _redis() {
+    return this.queue.client; // BullMQ resolves this to the ioredis connection
+  }
+
+  // Atomically reserve a key. Returns "OK" if newly reserved, null if it
+  // already exists (a duplicate). Stored value starts as `pending:<hash>`.
+  async reserveIdempotency(key, bodyHash, ttlSec = 86400) {
+    const c = await this._redis();
+    return c.set(`idem:${key}`, `pending:${bodyHash}`, "EX", ttlSec, "NX");
+  }
+
+  // Finalize a reserved key with the real jobId.
+  async setIdempotencyJob(key, jobId, bodyHash, ttlSec = 86400) {
+    const c = await this._redis();
+    await c.set(`idem:${key}`, `${jobId}:${bodyHash}`, "EX", ttlSec);
+  }
+
+  // Returns { jobId|null, bodyHash, pending } for an existing key, or null.
+  async getIdempotency(key) {
+    const c = await this._redis();
+    const val = await c.get(`idem:${key}`);
+    if (!val) return null;
+    if (val.startsWith("pending:")) return { jobId: null, bodyHash: val.slice(8), pending: true };
+    const idx = val.lastIndexOf(":");
+    return { jobId: val.slice(0, idx), bodyHash: val.slice(idx + 1), pending: false };
+  }
+
+  async releaseIdempotency(key) {
+    const c = await this._redis();
+    await c.del(`idem:${key}`).catch(() => {});
+  }
+
   getJob(id) {
     return this.queue.getJob(id);
   }
