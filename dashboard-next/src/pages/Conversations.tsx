@@ -44,22 +44,35 @@ export function ConversationsPage() {
   const [filter, setFilter] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [limit, setLimit] = useState(40);
+  const [hasMore, setHasMore] = useState(true);
   const threadEnd = useRef<HTMLDivElement>(null);
 
-  async function loadList() {
+  // Infinite scroll: each load asks the API for `n` rows (the GM sidebar is
+  // lazy-loaded server-side). Scrolling near the bottom bumps `n` and refetches,
+  // progressively loading every conversation — no manual refresh needed.
+  async function load(n = 40) {
     setLoading(true);
     try {
-      const d = await api<{ conversations: Conversation[] }>("/conversations?limit=200", {
+      const d = await api<{ conversations: Conversation[] }>(`/conversations?limit=${n}`, {
         headers: { "Content-Type": "text/plain" },
       });
       setList(d.conversations);
+      setHasMore(d.conversations.length >= n);
+      setLimit(n);
     } finally {
       setLoading(false);
     }
   }
   useEffect(() => {
-    loadList();
+    load(40);
   }, []);
+
+  function onListScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    if (loading || !hasMore) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) load(limit + 40);
+  }
 
   async function loadThread(c: Conversation, silent = false) {
     if (!silent) setLoadingMsg(true);
@@ -124,11 +137,11 @@ export function ConversationsPage() {
               className="h-9 w-full rounded-full border border-input bg-background/60 pl-8 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </div>
-          <Button variant="ghost" size="icon" onClick={loadList} disabled={loading} title="Reload">
+          <Button variant="ghost" size="icon" onClick={() => load(40)} disabled={loading} title="Reload">
             <RefreshCw className={cn("size-4", loading && "animate-spin")} />
           </Button>
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto" onScroll={onListScroll}>
           {shown.length === 0 ? (
             <div className="p-6 text-center text-sm text-muted-foreground">
               {loading ? "Loading…" : "No conversations."}
@@ -158,6 +171,19 @@ export function ConversationsPage() {
                 </div>
               </button>
             ))
+          )}
+          {list.length > 0 && (
+            <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+              {loading ? (
+                <>
+                  <Loader2 className="size-3 animate-spin" /> Loading more…
+                </>
+              ) : hasMore ? (
+                "Scroll to load more"
+              ) : (
+                "All conversations loaded"
+              )}
+            </div>
           )}
         </div>
       </div>
