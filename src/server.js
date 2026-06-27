@@ -29,6 +29,7 @@ const sendQueue = new SendQueue();
 const dashboardSessionCookieName = "gmweb_session";
 const dashboardPasswordCookieName = "gmweb_login";
 const dashboardDir = path.join(config.rootDir, "public", "dashboard");
+const spaDir = path.join(config.rootDir, "public", "dashboard-next");
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -274,7 +275,9 @@ function isDashboardAsset(requestUrl) {
   return pathname === "/" || pathname === "/dashboard" || pathname === "/dashboard/" ||
     pathname === "/dashboard/password-login" || pathname === "/dashboard/login" ||
     pathname === "/dashboard/logout" || pathname === "/dashboard/session" ||
-    pathname.startsWith("/dashboard/");
+    pathname.startsWith("/dashboard/") ||
+    // New React console (Vite SPA) served as static assets under /app.
+    pathname === "/app" || pathname.startsWith("/app/");
 }
 
 // Routes only accessible by master token or dashboard session (not project keys)
@@ -735,6 +738,28 @@ async function sendDashboardFile(reply, filename) {
   }
 }
 
+// Serve the Vite SPA build (public/dashboard-next) under /app. Unknown paths
+// fall back to index.html so client-side state routing works. relPath is the
+// part after "/app/" (may include "assets/...").
+async function sendSpaFile(reply, relPath) {
+  const clean = String(relPath || "").replace(/\\/g, "/");
+  if (clean.includes("..")) { reply.code(404).send("Not found"); return; }
+  const candidate = clean && clean !== "/" ? path.join(spaDir, clean) : path.join(spaDir, "index.html");
+  const ext = path.extname(candidate);
+  try {
+    const body = await fs.readFile(candidate);
+    reply.type(contentTypes[ext] || "application/octet-stream").send(body);
+  } catch {
+    // SPA fallback: serve index.html for any non-asset path
+    try {
+      const html = await fs.readFile(path.join(spaDir, "index.html"));
+      reply.type("text/html; charset=utf-8").send(html);
+    } catch {
+      reply.code(404).send("Console not built. Run: npm --prefix dashboard-next run build");
+    }
+  }
+}
+
 app.get("/health", {
   schema: {
     summary: "Health check",
@@ -764,6 +789,11 @@ if (config.dashboardEnabled) {
   app.get("/dashboard", async (_request, reply) => sendDashboardFile(reply, "index.html"));
   app.get("/dashboard/", async (_request, reply) => sendDashboardFile(reply, "index.html"));
   app.get("/dashboard/:file", async (request, reply) => sendDashboardFile(reply, request.params.file));
+
+  // New React console (Vite SPA). Static assets + SPA fallback. Hidden from OpenAPI.
+  app.get("/app", { schema: { hide: true } }, async (_request, reply) => sendSpaFile(reply, "index.html"));
+  app.get("/app/", { schema: { hide: true } }, async (_request, reply) => sendSpaFile(reply, "index.html"));
+  app.get("/app/*", { schema: { hide: true } }, async (request, reply) => sendSpaFile(reply, request.params["*"]));
 
   app.get("/dashboard/session", async (request) => {
     const session = dashboardSession(request);

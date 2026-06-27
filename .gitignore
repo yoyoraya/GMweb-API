@@ -7,3 +7,7 @@ data/
 
 # graphify regenerable cache (graph itself is committed)
 graphify-out/cache/
+
+# Vite SPA console deps (build output in public/dashboard-next is committed)
+dashboard-next/node_modules/
+dashboard-next/dist/
