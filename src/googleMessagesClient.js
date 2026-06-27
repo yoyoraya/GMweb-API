@@ -34,6 +34,11 @@ class GoogleMessagesClient extends EventEmitter {
     // main page alive. Runs off the browser lock — it only touches OTHER pages.
     this.rotationTimer = null;
     this.rotationGuardMs = Number(config.rotationGuardMs) || 3000;
+    // Grace period: give a freshly-opened RotateCookiesPage this long to finish
+    // rotating cookies on its own before we force-close it. Letting legit
+    // rotations complete can end Google's retry loop; we only kill STALLED tabs.
+    this.rotationGraceMs = Number(config.rotationGraceMs) || 8000;
+    this.rotationSeen = new WeakMap(); // page -> first-seen timestamp
   }
 
   async start() {
@@ -900,12 +905,16 @@ class GoogleMessagesClient extends EventEmitter {
   // wedges the Messages session (page spins, sends hang). We don't need it —
   // closing it lets the main page keep working. Touches only OTHER pages, so it
   // is safe to run without the browser lock.
-  async closeRotationTabs() {
+  // force=true closes any rotation tab immediately (used during recovery when the
+  // session is already wedged). Otherwise a fresh rotation tab gets rotationGraceMs
+  // to complete on its own; only a stalled tab (open past the grace) is closed.
+  async closeRotationTabs(force = false) {
     const browser = this.browser;
     const context = this.context;
     if (!browser && !context) return 0;
     const contexts = browser ? browser.contexts() : [context];
     let closed = 0;
+    const now = Date.now();
     for (const ctx of contexts) {
       let pages = [];
       try { pages = ctx.pages(); } catch { continue; }
@@ -913,7 +922,19 @@ class GoogleMessagesClient extends EventEmitter {
         if (pg === this.page) continue;
         let url = "";
         try { url = pg.url() || ""; } catch { continue; }
-        if (/accounts\.google\.com\/RotateCookies/i.test(url)) {
+        if (!/accounts\.google\.com\/RotateCookies/i.test(url)) continue;
+        if (force) {
+          await pg.close().catch(() => {});
+          closed += 1;
+          continue;
+        }
+        const seen = this.rotationSeen.get(pg);
+        if (seen === undefined) {
+          // First sighting — start the grace clock, let rotation try to finish.
+          this.rotationSeen.set(pg, now);
+          continue;
+        }
+        if (now - seen >= this.rotationGraceMs) {
           await pg.close().catch(() => {});
           closed += 1;
         }
@@ -1045,6 +1066,8 @@ class GoogleMessagesClient extends EventEmitter {
   async recover() {
     return this.withBrowserLock(async () => {
       this.stopPolling();
+      // Session is wedged — force-close any rotation tab immediately (skip grace).
+      await this.closeRotationTabs(true).catch(() => {});
       // In connect mode the browser process is owned by gmweb-chrome.service;
       // just drop our refs and reconnect rather than closing it.
       this.browser = null;

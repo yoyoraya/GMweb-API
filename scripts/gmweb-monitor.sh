@@ -24,15 +24,17 @@ BASE="http://127.0.0.1:${PORT}"
 count="$(cat "$STATE" 2>/dev/null || echo 0)"
 [[ "$count" =~ ^[0-9]+$ ]] || count=0
 
-# Belt-and-suspenders: close Google's RotateCookiesPage tab via CDP. The app
-# already does this every few seconds; this catches the case where the app
-# itself is wedged. Needs jq + the CDP port (9222).
 CDP_PORT="$(grep -m1 '^BROWSER_CDP_URL=' "$APP_DIR/.env" 2>/dev/null | grep -oE '[0-9]+$' || echo 9222)"
-if command -v jq >/dev/null 2>&1; then
+
+# Force-close Google's RotateCookiesPage tab(s) via CDP. Only used when the
+# session is already wedged — when healthy we leave rotation alone so the app's
+# in-grace logic can let a legit rotation finish (which can end Google's loop).
+close_rotation() {
+  command -v jq >/dev/null 2>&1 || return 0
   for id in $(curl -fsS -m 5 "http://127.0.0.1:${CDP_PORT}/json" 2>/dev/null | jq -r '.[] | select(.url|test("RotateCookies")) | .id' 2>/dev/null); do
-    curl -fsS -m 5 "http://127.0.0.1:${CDP_PORT}/json/close/$id" >/dev/null 2>&1 && log "closed RotateCookiesPage tab $id"
+    curl -fsS -m 5 "http://127.0.0.1:${CDP_PORT}/json/close/$id" >/dev/null 2>&1 && log "force-closed wedged RotateCookiesPage tab $id"
   done
-fi
+}
 
 # 1) Is the API process answering at all?
 if ! curl -fsS -m 8 "$BASE/health" >/dev/null 2>&1; then
@@ -50,7 +52,17 @@ if echo "$ready" | grep -q '"paired":true'; then
   exit 0
 fi
 
-# Not paired / not ready.
+# Not paired / not ready -> the session is wedged. First try the cheap fix:
+# force-close any stuck rotation tab and re-check before escalating to a restart.
+close_rotation
+sleep 3
+ready="$(curl -fsS -m 15 -H "Authorization: Bearer $TOKEN" "$BASE/ready" 2>/dev/null || echo '')"
+if echo "$ready" | grep -q '"paired":true'; then
+  log "recovered by closing rotation tab (no restart needed)"
+  echo 0 >"$STATE"
+  exit 0
+fi
+
 count=$((count + 1))
 echo "$count" >"$STATE"
 log "not paired (cycle $count/$FAIL_THRESHOLD): ${ready:-no response}"
