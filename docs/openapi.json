@@ -3,7 +3,7 @@
   "info": {
     "title": "GMweb API",
     "description": "Google Messages SMS/RCS gateway — control Google Messages Web via a REST API.\n\n## Authentication\nAll endpoints (except `/health`) require a Bearer token in the `Authorization` header.\n\nTwo token types are accepted:\n- **Master token** (`API_TOKEN` env var) — full access to all endpoints including admin and key management.\n- **Project API key** (`gmw_...`) — access to messaging & conversation endpoints only. Admin routes return 401.\n\n```\nAuthorization: Bearer gmw_your_project_token\n```\n\n## Rate Limits\nProject keys have configurable per-minute and per-hour send limits.\nRepeated auth failures from an IP trigger a 30-minute block.",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "contact": {
       "name": "GMweb API"
     }
@@ -976,7 +976,7 @@
         "tags": [
           "Messaging"
         ],
-        "description": "Queue an SMS/RCS message for delivery via Google Messages.\n\n**Asynchronous by default.** The message is added to a durable Redis-backed\nqueue and processed in the background by a single worker (one browser, one\nsend at a time). The endpoint returns a `jobId` immediately with HTTP 202.\n\n**Track delivery via:**\n- `GET /send/status/{jobId}` — poll the job state\n- `GET /events` (SSE) — real-time `send_processing` / `send_completed` / `send_failed`\n\n**Retries:** failed sends retry up to 3 times with exponential backoff.\n\n**Synchronous mode:** pass `\"wait\": true` to block until the send finishes\n(up to 90s) and receive the result directly. Use only for low-volume callers.\n\n**Priority:** pass `\"priority\": \"high\"` to jump the queue. A high-priority\nmessage is processed **next** (right after the send already in flight finishes),\nahead of every normal-priority message still waiting — then the queue/campaign\ncontinues as before. Use it for time-sensitive transactional messages (e.g. a\nrenewal confirmation) so they aren't stuck behind a bulk reminder campaign.\n\n**Rate limits (project keys):** configurable per-minute and per-hour (default 10/min, 100/hr).\n\n**Phone format:** include country code, e.g. `+989121234567`.",
+        "description": "Queue an SMS/RCS message for delivery via Google Messages.\n\n**Asynchronous by default.** The message is added to a durable Redis-backed\nqueue and processed in the background by a single worker (one browser, one\nsend at a time). The endpoint returns a `jobId` immediately with HTTP 202.\n\n**Track delivery via:**\n- `GET /send/status/{jobId}` — poll the job state\n- `GET /events` (SSE) — real-time `send_processing` / `send_completed` / `send_failed`\n\n**Retries:** failed sends retry up to 3 times with exponential backoff.\n\n**Synchronous mode:** pass `\"wait\": true` to block until the send finishes\n(up to 90s) and receive the result directly. Use only for low-volume callers.\n\n**Priority:** pass `\"priority\": \"high\"` to jump the queue. A high-priority\nmessage is processed **next** (right after the send already in flight finishes),\nahead of every normal-priority message still waiting — then the queue/campaign\ncontinues as before. Use it for time-sensitive transactional messages (e.g. a\nrenewal confirmation) so they aren't stuck behind a bulk reminder campaign.\n\n**Rate limits (project keys):** configurable per-minute and per-hour (default 10/min, 100/hr).\n\n**Phone format:** include country code, e.g. `+989121234567`.\n\n**Auto de-dupe:** an identical `{to,text}` re-sent within ~120s (no Idempotency-Key needed) is suppressed and returns `status:\"duplicate_suppressed\"` with the original `jobId` — guards against accidental double-posting.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1035,27 +1035,38 @@
         ],
         "responses": {
           "200": {
-            "description": "Returned when wait=true and the send succeeded, or for a deduped Idempotency-Key whose job already completed",
+            "description": "Returned when wait=true and the send succeeded, for a deduped Idempotency-Key whose job already completed, or when an identical {to,text} was suppressed within the dedupe window (`duplicate_suppressed`).",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "description": "Returned when wait=true and the send succeeded, or for a deduped Idempotency-Key whose job already completed",
+                  "description": "Returned when wait=true and the send succeeded, for a deduped Idempotency-Key whose job already completed, or when an identical {to,text} was suppressed within the dedupe window (`duplicate_suppressed`).",
                   "properties": {
                     "ok": {
                       "type": "boolean"
                     },
                     "jobId": {
-                      "type": "string"
+                      "type": [
+                        "null",
+                        "string"
+                      ]
                     },
                     "status": {
                       "type": "string",
                       "enum": [
-                        "completed"
+                        "completed",
+                        "duplicate_suppressed"
                       ]
                     },
                     "deduped": {
                       "type": "boolean"
+                    },
+                    "priority": {
+                      "type": "string",
+                      "enum": [
+                        "high",
+                        "normal"
+                      ]
                     },
                     "result": {
                       "type": "object"

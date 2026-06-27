@@ -65,6 +65,30 @@ class SendQueue {
     await c.del(`idem:${key}`).catch(() => {});
   }
 
+  // --- Automatic content de-dupe ------------------------------------------
+  // Suppresses an identical {to,text} re-sent within a short window even when
+  // the caller forgot an Idempotency-Key (observed: a consumer double-POSTing
+  // the same SMS seconds apart). Atomic SET NX reserves the content hash.
+  async reserveDedupe(hash, ttlSec) {
+    const c = await this._redis();
+    return c.set(`dd:${hash}`, "pending", "EX", ttlSec, "NX"); // "OK" if new, null if dup
+  }
+
+  async setDedupeJob(hash, jobId, ttlSec) {
+    const c = await this._redis();
+    await c.set(`dd:${hash}`, String(jobId), "EX", ttlSec);
+  }
+
+  async getDedupe(hash) {
+    const c = await this._redis();
+    return c.get(`dd:${hash}`);
+  }
+
+  async releaseDedupe(hash) {
+    const c = await this._redis();
+    await c.del(`dd:${hash}`).catch(() => {});
+  }
+
   getJob(id) {
     return this.queue.getJob(id);
   }

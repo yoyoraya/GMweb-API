@@ -414,6 +414,10 @@ client.on("error", (error) => app.log.warn({ error }, "client error"));
 // Hard per-send timeout so a wedged page can never stall the queue, plus
 // auto-recovery (reconnect + fresh page) after consecutive failures.
 const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS) || 80000;
+// Suppress an identical {to,text} re-sent within this window (seconds) even when
+// the caller sends no Idempotency-Key. 0 disables. Guards against a consumer
+// accidentally POSTing the same SMS multiple times.
+const SEND_DEDUPE_SECONDS = Number(process.env.SEND_DEDUPE_SECONDS) || 120;
 const SEND_FAIL_RESTART_THRESHOLD = Number(process.env.SEND_FAIL_RESTART_THRESHOLD) || 3;
 let sendFailStreak = 0;
 let recovering = false;
@@ -1284,7 +1288,9 @@ app.post("/send", {
       "",
       "**Rate limits (project keys):** configurable per-minute and per-hour (default 10/min, 100/hr).",
       "",
-      "**Phone format:** include country code, e.g. `+989121234567`."
+      "**Phone format:** include country code, e.g. `+989121234567`.",
+      "",
+      "**Auto de-dupe:** an identical `{to,text}` re-sent within ~120s (no Idempotency-Key needed) is suppressed and returns `status:\"duplicate_suppressed\"` with the original `jobId` — guards against accidental double-posting."
     ].join("\n"),
     tags: ["Messaging"],
     body: {
@@ -1333,12 +1339,13 @@ app.post("/send", {
       },
       200: {
         type: "object",
-        description: "Returned when wait=true and the send succeeded, or for a deduped Idempotency-Key whose job already completed",
+        description: "Returned when wait=true and the send succeeded, for a deduped Idempotency-Key whose job already completed, or when an identical {to,text} was suppressed within the dedupe window (`duplicate_suppressed`).",
         properties: {
           ok: { type: "boolean" },
-          jobId: { type: "string" },
-          status: { type: "string", enum: ["completed"] },
+          jobId: { type: ["string", "null"] },
+          status: { type: "string", enum: ["completed", "duplicate_suppressed"] },
           deduped: { type: "boolean" },
+          priority: { type: "string", enum: ["high", "normal"] },
           result: { type: "object" }
         }
       },
@@ -1431,6 +1438,30 @@ app.post("/send", {
     }
   }
 
+  // Automatic content de-dupe (only when no explicit Idempotency-Key was given,
+  // since that path already dedupes). Blocks the exact same {to,text} re-sent
+  // within SEND_DEDUPE_SECONDS — returns the original job instead of sending again.
+  const contentHash = crypto.createHash("sha256").update(`${to}\n${text}`).digest("hex").slice(0, 24);
+  if (!idemKey && SEND_DEDUPE_SECONDS > 0) {
+    const reserved = await sendQueue.reserveDedupe(contentHash, SEND_DEDUPE_SECONDS).catch(() => "OK");
+    if (reserved !== "OK") {
+      let existing = await sendQueue.getDedupe(contentHash).catch(() => null);
+      for (let i = 0; i < 20 && existing === "pending"; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        existing = await sendQueue.getDedupe(contentHash).catch(() => null);
+      }
+      app.log.warn({ to }, "duplicate send suppressed (same to/text within dedupe window)");
+      reply.code(200);
+      return {
+        ok: true,
+        jobId: existing && existing !== "pending" ? existing : null,
+        status: "duplicate_suppressed",
+        deduped: true,
+        priority: highPriority ? "high" : "normal"
+      };
+    }
+  }
+
   let job;
   try {
     job = await sendQueue.enqueue(
@@ -1439,9 +1470,11 @@ app.post("/send", {
     );
   } catch (error) {
     if (idemKey) await sendQueue.releaseIdempotency(idemKey);
+    if (!idemKey && SEND_DEDUPE_SECONDS > 0) await sendQueue.releaseDedupe(contentHash);
     throw error;
   }
   if (idemKey) await sendQueue.setIdempotencyJob(idemKey, job.id, bodyHash).catch(() => {});
+  if (!idemKey && SEND_DEDUPE_SECONDS > 0) await sendQueue.setDedupeJob(contentHash, job.id, SEND_DEDUPE_SECONDS).catch(() => {});
   emitSse({ type: "send_queued", jobId: job.id, to, priority: highPriority ? "high" : "normal", at: new Date().toISOString() });
 
   if (wait) {
