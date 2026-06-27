@@ -158,6 +158,16 @@ sync_app() {
   step "Installing npm dependencies"
   runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR' && (npm ci --omit=dev || npm install --omit=dev)" >>"$INSTALL_LOG" 2>&1 && ok "Deps installed" || warn "npm install had issues — check $INSTALL_LOG"
   chmod +x "$APP_DIR"/scripts/*.sh 2>/dev/null || true
+
+  # The React console (/app) ships pre-built in public/dashboard-next. If a source
+  # checkout is missing the build, build it here so /app works out of the box.
+  if [[ -f "$APP_DIR/dashboard-next/package.json" && ! -f "$APP_DIR/public/dashboard-next/index.html" ]]; then
+    step "Building the React console (/app)"
+    runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/dashboard-next' && npm ci && npm run build" >>"$INSTALL_LOG" 2>&1 \
+      && ok "Console built" || warn "Console build skipped/failed — /dashboard still works. See $INSTALL_LOG"
+  else
+    [[ -f "$APP_DIR/public/dashboard-next/index.html" ]] && ok "React console present (/app)"
+  fi
 }
 
 write_env() {
@@ -197,6 +207,11 @@ DASHBOARD_LOGIN_MAX=20
 ADMIN_ACTION_WINDOW_MS=60000
 ADMIN_ACTION_MAX=60
 VNC_PROXY_TARGET=http://127.0.0.1:$NOVNC_PORT
+
+# Reliability / self-healing tuning (safe defaults)
+SEND_DEDUPE_SECONDS=120
+SEND_TIMEOUT_MS=80000
+SEND_FAIL_RESTART_THRESHOLD=3
 ENV
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"; chmod 600 "$APP_DIR/.env"
   printf '%s' "$pass" >"$STATE_DIR/dashboard-password.txt"; chmod 600 "$STATE_DIR/dashboard-password.txt"
@@ -342,9 +357,10 @@ show_credentials() {
   ip="$(curl -fsS -m 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
   echo "${BOLD}${GRN}GMweb is installed.${RST}"
   echo
-  echo "  ${BOLD}Dashboard:${RST}  http://127.0.0.1:$APP_PORT/dashboard  (local)"
-  echo "  ${BOLD}Username:${RST}   $user"
-  echo "  ${BOLD}Password:${RST}   $pass"
+  echo "  ${BOLD}Console (new):${RST} http://127.0.0.1:$APP_PORT/app        ${DIM}React UI${RST}"
+  echo "  ${BOLD}Dashboard:${RST}     http://127.0.0.1:$APP_PORT/dashboard  ${DIM}classic${RST}"
+  echo "  ${BOLD}Username:${RST}      $user"
+  echo "  ${BOLD}Password:${RST}      $pass"
   echo "  ${BOLD}API token:${RST}  $token"
   echo "  ${BOLD}Server IP:${RST}  ${ip:-unknown}"
   echo
