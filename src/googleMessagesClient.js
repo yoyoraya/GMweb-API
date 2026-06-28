@@ -230,10 +230,12 @@ class GoogleMessagesClient extends EventEmitter {
     await page.bringToFront().catch(() => {});
     await this.ensurePaired();
 
-    // Priority order — only the last resort reloads the page:
-    //   1. Already on this conversation  → type & send (instant)
-    //   2. Start-chat UI flow            → pure SPA, no reload, any number
-    //   3. Open by URL                   → full page load (slow, fallback)
+    // Priority order — prefer SPA navigation, avoid reloads & the fragile
+    // Start-chat flow whenever the customer already has a conversation:
+    //   1. Already on this conversation     → type & send (instant)
+    //   2. Existing conversation in sidebar → scroll-find + click (SPA, no reload)
+    //   3. Start-chat UI flow               → only for genuinely NEW numbers
+    //   4. Open by URL                      → last-resort reload
     let opened = false;
     let fastPath = false;
 
@@ -247,12 +249,17 @@ class GoogleMessagesClient extends EventEmitter {
       }
     }
 
-    // 2. Start-chat UI flow — click, type the number, confirm. No reload.
+    // 2. Existing conversation — find it in the sidebar and click it (no reload).
+    if (!opened) {
+      opened = await this.openExistingConversation(to);
+    }
+
+    // 3. New number — Start-chat UI flow (no existing thread to click).
     if (!opened) {
       opened = await this.startChatFlow(to);
     }
 
-    // 3. Last resort — navigate by URL (full reload).
+    // 4. Last resort — navigate by URL (full reload).
     if (!opened) {
       opened = await this.openConversationByUrl(to);
     }
@@ -293,6 +300,40 @@ class GoogleMessagesClient extends EventEmitter {
     }
   }
 
+  // Open an EXISTING conversation by finding it in the sidebar and clicking it
+  // (pure SPA navigation — no page reload, no fragile Start-chat flow). Tries the
+  // already-rendered rows first (cheap), then lazy-scrolls the whole list so even
+  // older customers are found. Returns false only for genuinely new numbers.
+  async openExistingConversation(to) {
+    const page = await this.ensurePage();
+
+    // Shallow pass — recent customers are near the top, no scroll needed.
+    let conversations = await this.listConversationsUnlocked(15);
+    let match = conversations.find((c) => this.conversationMatchesRecipient(c, to));
+
+    // Deep pass — scroll the sidebar to load the full history, then re-match.
+    if (!match) {
+      conversations = await this.listConversationsUnlocked(300);
+      match = conversations.find((c) => this.conversationMatchesRecipient(c, to));
+    }
+    if (!match?.href) return false;
+
+    // Already viewing it?
+    const convId = match.href.split("/").pop();
+    if (convId && page.url().includes(convId) && await this.composerReady(800)) {
+      this.cacheRecipientConversation(to, match.href);
+      return true;
+    }
+
+    const clicked = await this.clickConversationInSidebar(page, match.href);
+    if (!clicked) return false;
+    if (await this.composerReady(6000)) {
+      this.cacheRecipientConversation(to, match.href);
+      return true;
+    }
+    return false;
+  }
+
   // Open a conversation purely through the "Start chat" UI — no page reload.
   // Works for ANY number regardless of whether it is visible in the sidebar.
   async startChatFlow(to) {
@@ -316,12 +357,16 @@ class GoogleMessagesClient extends EventEmitter {
         "input[type='text']"
       ]);
       await recipientInput.fill(to);
-
-      // Let the "Send to <number>" suggestion render, then confirm it.
       await page.waitForTimeout(300);
-      await this.clickRecipientOption(to);
 
-      return await this.composerReady(8000);
+      // Commit the recipient. For a typed number, Enter creates the chip and
+      // opens the SMS thread — the most reliable path. If the composer doesn't
+      // appear, fall back to clicking the "Send to <number>" suggestion row.
+      await recipientInput.press("Enter").catch(() => {});
+      if (await this.composerReady(3500)) return true;
+
+      await this.clickRecipientOption(to);
+      return await this.composerReady(6000);
     } catch {
       return false;
     }
