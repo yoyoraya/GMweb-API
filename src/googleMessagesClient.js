@@ -382,16 +382,14 @@ class GoogleMessagesClient extends EventEmitter {
         "input[type='text']"
       ]);
       await recipientInput.fill(to);
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(500); // let the "Send to <number>" / contact rows render
 
-      // Commit the recipient. For a typed number, Enter creates the chip and
-      // opens the SMS thread — the most reliable path. If the composer doesn't
-      // appear, fall back to clicking the "Send to <number>" suggestion row.
+      // Commit the recipient by CLICKING the suggestion row (the reliable, human
+      // way) — it returns true only once the composer actually opened. Enter is a
+      // last-resort fallback for layouts where no row is clickable.
+      if (await this.clickRecipientOption(to)) return true;
       await recipientInput.press("Enter").catch(() => {});
-      if (await this.composerReady(3500)) return true;
-
-      await this.clickRecipientOption(to);
-      return await this.composerReady(6000);
+      return await this.composerReady(5000);
     } catch {
       return false;
     }
@@ -849,27 +847,36 @@ class GoogleMessagesClient extends EventEmitter {
     this.writeConversationCache();
   }
 
+  // Click a recipient suggestion to actually OPEN the conversation. GM shows a
+  // "Send to <number>" row and (if known) a contact row — clicking either opens
+  // the thread. We try each, and only return true once the message composer is
+  // really present, so a click that didn't commit is treated as a miss.
   async clickRecipientOption(to) {
     const page = await this.ensurePage();
-    const normalizedLocal = to.replace(/^\+98/, "0");
-    // "Send to <number>" is the canonical suggestion and usually appears first;
-    // short per-candidate timeouts keep this snappy when it doesn't match.
-    const candidates = [
-      `Send to ${to}`,
-      to,
-      normalizedLocal
+    const local = to.replace(/^\+98/, "0");
+    // Most specific first: the exact "Send to <number>" row, then any suggestion
+    // row that contains the number (contact match), then the bare number text.
+    const selectors = [
+      `text=Send to ${to}`,
+      `text=Send to ${local}`,
+      `[role='option']:has-text("${to}")`,
+      `[role='listitem']:has-text("${to}")`,
+      `[role='option']:has-text("${local}")`,
+      `mws-contact-selection-list :has-text("${to}")`,
+      `text=${to}`,
+      `text=${local}`
     ];
 
-    for (const candidate of candidates) {
+    for (const sel of selectors) {
       try {
-        await page.getByText(candidate, { exact: false }).first().click({ timeout: 1200 });
-        return true;
+        const loc = page.locator(sel).first();
+        await loc.waitFor({ state: "visible", timeout: 1500 });
+        await loc.click({ timeout: 1500 });
+        if (await this.composerReady(5000)) return true; // confirmed: thread opened
       } catch {
-        // Try the next visible recipient label.
+        // Not this row — try the next.
       }
     }
-
-    await page.keyboard.press("Enter");
     return false;
   }
 
