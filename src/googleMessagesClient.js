@@ -448,21 +448,24 @@ class GoogleMessagesClient extends EventEmitter {
     });
     await messageInput.press("Enter");
 
-    // Verify: composer cleared OR our text is now the last outgoing message.
+    // Soft verify: assume the send went (GM clears the composer on success), and
+    // only report failure if we have POSITIVE evidence it's stuck — i.e. the
+    // composer STILL holds our exact text a moment later. This avoids false
+    // negatives (which would make every send "fail") while still catching the
+    // real wedge where Enter silently does nothing.
+    await page.waitForTimeout(900);
     try {
-      await page.waitForFunction((sent) => {
+      const stillHasText = await page.evaluate((sent) => {
         const el = document.querySelector(
           "[aria-label*='Text message' i], textarea[aria-label*='message' i], [contenteditable='true'][aria-label*='message' i], textarea, [contenteditable='true']"
         );
-        const composerEmpty = el ? ((el.value !== undefined ? el.value : el.textContent) || "").trim().length === 0 : false;
-        const bubbles = document.querySelectorAll("mws-text-message-part");
-        const last = bubbles[bubbles.length - 1];
-        const lastText = last ? (last.innerText || last.textContent || "").replace(/\s+/g, " ").trim() : "";
-        return composerEmpty || lastText === sent;
-      }, text.replace(/\s+/g, " ").trim(), { timeout: 8000 });
-      return true;
+        if (!el) return false;
+        const val = ((el.value !== undefined ? el.value : el.textContent) || "").replace(/\s+/g, " ").trim();
+        return val === sent;
+      }, text.replace(/\s+/g, " ").trim());
+      return !stillHasText;
     } catch {
-      return false;
+      return true; // can't tell → assume sent (don't manufacture failures)
     }
   }
 
