@@ -13,6 +13,7 @@ function client() {
 
 test("send retries stay inside the SPA and defer after three UI misses", async () => {
   const c = client();
+  assert(c.sendOperationTimeoutMs >= 220000);
   const attempts = [];
   let navigations = 0;
   const page = {

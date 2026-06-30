@@ -417,7 +417,9 @@ client.on("error", (error) => app.log.warn({ error }, "client error"));
 // Queue worker: processes one send at a time using the shared browser.
 // Hard per-send timeout so a wedged page can never stall the queue, plus
 // auto-recovery (reconnect + fresh page) after consecutive failures.
-const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS) || 80000;
+// The UI flow intentionally gets up to three attempts. Preserve that contract
+// even on installations carrying the old 80-second environment default.
+const SEND_TIMEOUT_MS = Math.max(240000, Number(config.sendTimeoutMs) || 240000);
 // Durable de-dupe window: an identical {to,text} already SENT within this many
 // hours (or still in flight) is suppressed — even with no Idempotency-Key, and
 // even across restarts (backed by the SQLite ledger). Default 24h.

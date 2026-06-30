@@ -25,6 +25,9 @@ class GoogleMessagesClient extends EventEmitter {
     // Hard cap on how long any single locked browser op may run. A wedged page
     // can otherwise hold the lock forever and stall the whole send queue.
     this.lockTimeoutMs = Number(config.lockTimeoutMs) || 70000;
+    // Three in-SPA open attempts (including pacing and Google's rendering)
+    // need a wider budget than ordinary browser actions.
+    this.sendOperationTimeoutMs = Math.max(220000, Number(config.sendTimeoutMs || 0) - 10000);
     // How long ensurePaired() will wait through transient Google cookie-rotation
     // before giving up. Kept well under lockTimeoutMs so the watchdog still fires.
     this.pairedWaitMs = Number(config.pairedWaitMs) || 20000;
@@ -263,7 +266,10 @@ class GoogleMessagesClient extends EventEmitter {
   }
 
   async sendMessage({ to, text, onStage }) {
-    return this.withBrowserLock(() => this.sendMessageUnlocked({ to, text, onStage }));
+    return this.withBrowserLock(
+      () => this.sendMessageUnlocked({ to, text, onStage }),
+      { timeoutMs: this.sendOperationTimeoutMs }
+    );
   }
 
   // Try, in order, to open the recipient's conversation. Returns true on success.
