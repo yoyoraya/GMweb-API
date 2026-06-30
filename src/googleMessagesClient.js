@@ -307,16 +307,16 @@ class GoogleMessagesClient extends EventEmitter {
     return event;
   }
 
-  // Resolves true once the real MESSAGE composer is present (a conversation is
-  // open and ready to type into). Deliberately strict — the Start-chat recipient
-  // box also matches a bare textarea/contenteditable, so we key on the
-  // message-specific aria-label/placeholder to avoid a false "ready".
+  // Resolves true once the message composer is present (a conversation is open
+  // and ready to type into). Broad on purpose so it matches GM's composer across
+  // layouts; correctness is guaranteed downstream by typeAndSend's send-verify,
+  // so a rare false "ready" just costs one retry rather than a silent failure.
   async composerReady(timeout = 2000) {
     const page = await this.ensurePage();
     try {
       await page.waitForFunction(() => {
         return !!document.querySelector(
-          "[aria-label*='Text message' i], textarea[aria-label*='message' i], textarea[placeholder*='message' i], [contenteditable='true'][aria-label*='message' i]"
+          "[aria-label*='Text message' i], [aria-label*='Message' i], textarea, [contenteditable='true']"
         );
       }, null, { timeout });
       return true;
@@ -435,9 +435,12 @@ class GoogleMessagesClient extends EventEmitter {
     const page = await this.ensurePage();
     const messageInput = await this.locatorFirst([
       "[aria-label*='Text message' i]",
+      "[aria-label*='Message' i]",
       "textarea[aria-label*='message' i]",
       "textarea[placeholder*='message' i]",
-      "[contenteditable='true'][aria-label*='message' i]"
+      "[contenteditable='true'][aria-label*='message' i]",
+      "[contenteditable='true']",
+      "textarea"
     ]);
     await messageInput.fill(text).catch(async () => {
       await messageInput.click();
@@ -449,7 +452,7 @@ class GoogleMessagesClient extends EventEmitter {
     try {
       await page.waitForFunction((sent) => {
         const el = document.querySelector(
-          "[aria-label*='Text message' i], textarea[aria-label*='message' i], [contenteditable='true'][aria-label*='message' i]"
+          "[aria-label*='Text message' i], textarea[aria-label*='message' i], [contenteditable='true'][aria-label*='message' i], textarea, [contenteditable='true']"
         );
         const composerEmpty = el ? ((el.value !== undefined ? el.value : el.textContent) || "").trim().length === 0 : false;
         const bubbles = document.querySelectorAll("mws-text-message-part");
