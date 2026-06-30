@@ -619,7 +619,9 @@ class GoogleMessagesClient extends EventEmitter {
     if (this.sidebarIndexWarmPromise) return this.sidebarIndexWarmPromise;
     this.sidebarIndexWarmPromise = this.withBrowserLock(
       () => this.preloadConversationIndexUnlocked(onStage),
-      { timeoutMs: 600000 }
+      // A busy account can expose thousands of threads. Google releases only
+      // ~25 per batch and occasionally takes several seconds between batches.
+      { timeoutMs: 20 * 60 * 1000 }
     ).finally(() => { this.sidebarIndexWarmPromise = null; });
     return this.sidebarIndexWarmPromise;
   }
