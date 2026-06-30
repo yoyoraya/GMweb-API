@@ -185,12 +185,19 @@ the page spins, sends hang, the queue backs up. GMweb fights this on three level
    2 min and restarts Chrome + API if the session stays unpaired.
 
 Sends are paced by default (minimum 15 seconds apart, maximum 4 starts per minute).
+At startup GMweb also expands the Google Messages sidebar with its real
+`Load more conversations` control, indexes conversations until it reaches a
+previous-year timestamp, and prefers those existing threads over Start chat.
+If Start chat selects a recipient but does not open the composer, GMweb retries
+the UI three times without reloading the whole app. A normal-priority miss goes
+to the queue tail; a high-priority miss is retried after ten successful sends.
 If Google displays "Please wait before creating more conversations", the queue
 auto-pauses instead of retrying into the restriction. Resume it only after the
 session has rested, using `POST /admin/queue/resume`. You can also pause it with
 `POST /admin/queue/pause`. Tunables (env): `SEND_MIN_INTERVAL_MS`,
 `SEND_MAX_PER_MINUTE`, `SEND_DEDUPE_SECONDS`, `SEND_TIMEOUT_MS`,
-`SEND_FAIL_RESTART_THRESHOLD`, `POLL_INTERVAL_MS`.
+`SEND_FAIL_RESTART_THRESHOLD`, `CONVERSATION_HISTORY_MAX_BATCHES`,
+`POLL_INTERVAL_MS`.
 
 ---
 

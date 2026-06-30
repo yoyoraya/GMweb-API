@@ -441,6 +441,70 @@ async function waitForSendPace(job) {
   lastSendStartedAt = Date.now();
 }
 
+function isHighPriorityJob(job) {
+  return job?.data?.priority === "high" || Boolean(job?.opts?.lifo);
+}
+
+async function deferConversationJob(job, error) {
+  const high = isHighPriorityJob(job);
+  const ledger = sendStore.byJob(job.id);
+  const data = {
+    ...job.data,
+    priority: high ? "high" : "normal",
+    _ledgerId: ledger?.id || job.data?._ledgerId || null
+  };
+  sendStore.markStatus(job.id, "queued", {
+    attempts: job.attemptsMade || 0,
+    error: error.message
+  });
+
+  const deferred = high
+    ? await sendQueue.deferHigh(data, 10)
+    : { job: await sendQueue.deferNormal(data), releaseAt: null };
+  if (data._ledgerId) sendStore.attachJob(data._ledgerId, deferred.job.id);
+  if (data._idempotencyKey && data._bodyHash) {
+    await sendQueue.setIdempotencyJob(data._idempotencyKey, deferred.job.id, data._bodyHash).catch(() => {});
+  }
+
+  const event = {
+    type: "send_deferred",
+    jobId: job.id,
+    deferredJobId: deferred.job.id,
+    to: job.data?.to,
+    priority: high ? "high" : "normal",
+    releaseAfterSuccesses: high ? 10 : 0,
+    at: new Date().toISOString()
+  };
+  emitSse(event);
+  return { deferred: true, ...event };
+}
+
+async function handleSendCompleted(job, result) {
+  if (result?.deferred) return;
+  sendStore.markStatus(job.id, "sent", { attempts: job.attemptsMade || 0 });
+  const event = {
+    type: "send_completed",
+    jobId: job.id,
+    to: job.data?.to,
+    text: job.data?.text,
+    fastPath: result?.fastPath,
+    at: result?.at || new Date().toISOString()
+  };
+  emitSse(event);
+  postWebhook(event);
+
+  const release = await sendQueue.recordSuccessAndReleaseHigh();
+  if (release.released) {
+    emitSse({
+      type: "send_deferred_released",
+      jobId: release.released.id,
+      to: release.released.data?.to,
+      successSequence: release.sequence,
+      at: new Date().toISOString()
+    });
+  }
+}
+
 function startSendWorker() {
   sendQueue.startWorker(
     async (job) => {
@@ -471,6 +535,9 @@ function startSendWorker() {
             at: new Date().toISOString()
           });
         }
+        if (error?.code === "CONVERSATION_OPEN_DEFER") {
+          return deferConversationJob(job, error);
+        }
         throw error;
       }
     },
@@ -485,17 +552,8 @@ function startSendWorker() {
         });
       },
       onCompleted: (job, result) => {
-        sendStore.markStatus(job.id, "sent", { attempts: job.attemptsMade || 0 });
-        const event = {
-          type: "send_completed",
-          jobId: job.id,
-          to: job.data?.to,
-          text: job.data?.text,
-          fastPath: result?.fastPath,
-          at: result?.at || new Date().toISOString()
-        };
-        emitSse(event);
-        postWebhook(event);
+        handleSendCompleted(job, result)
+          .catch((error) => app.log.warn({ error }, "send completion bookkeeping failed"));
       },
       onFailed: (job, err) => {
         const attemptsMade = job?.attemptsMade || 0;
@@ -1518,7 +1576,15 @@ app.post("/send", {
   let job;
   try {
     job = await sendQueue.enqueue(
-      { to, text, keyId: projectKey?.id || null, keyName: projectKey?.name || "master" },
+      {
+        to,
+        text,
+        keyId: projectKey?.id || null,
+        keyName: projectKey?.name || "master",
+        priority: highPriority ? "high" : "normal",
+        _idempotencyKey: idemKey,
+        _bodyHash: bodyHash
+      },
       enqueueOpts
     );
   } catch (error) {
@@ -1533,6 +1599,16 @@ app.post("/send", {
   if (wait) {
     try {
       const result = await sendQueue.waitForJob(job, 90000);
+      if (result?.deferred) {
+        reply.code(202);
+        return {
+          ok: true,
+          jobId: result.deferredJobId,
+          status: "deferred",
+          priority: result.priority,
+          releaseAfterSuccesses: result.releaseAfterSuccesses
+        };
+      }
       return { ok: true, jobId: job.id, status: "completed", result };
     } catch (error) {
       reply.code(502).send({ ok: false, jobId: job.id, status: "failed", error: error.message });
@@ -1753,9 +1829,15 @@ app.post("/admin/queue/jobs/:id/promote", {
     params: { type: "object", properties: { id: { type: "string" } } }
   }
 }, async (request, reply) => {
+  const ledger = sendStore.byJob(request.params.id);
   const result = await sendQueue.promoteJob(request.params.id);
   if (!result) { reply.code(404).send({ error: "not_found" }); return; }
-  return { ok: true, ...result };
+  if (result.promoted && ledger) sendStore.attachJob(ledger.id, result.id);
+  if (result.promoted && result._data?._idempotencyKey && result._data?._bodyHash) {
+    await sendQueue.setIdempotencyJob(result._data._idempotencyKey, result.id, result._data._bodyHash).catch(() => {});
+  }
+  const { _data, ...publicResult } = result;
+  return { ok: true, ...publicResult };
 });
 
 app.delete("/admin/queue/jobs/:id", {
@@ -2003,7 +2085,7 @@ async function reconcilePending() {
     if (alive) continue;
     try {
       const job = await sendQueue.enqueue(
-        { to: row.to_number, text: row.text, keyId: null, keyName: row.key_name || "reconcile" },
+        { to: row.to_number, text: row.text, keyId: null, keyName: row.key_name || "reconcile", priority: "normal" },
         {}
       );
       sendStore.attachJob(row.id, job.id);
@@ -2015,16 +2097,37 @@ async function reconcilePending() {
   if (restored) app.log.info(`reconciled ${restored} unfinished send(s) from the ledger into the queue`);
 }
 
+async function initializeBrowserAndConversationIndex({ resumeAfterWarm }) {
+  try {
+    await client.start();
+    const stats = await client.warmConversationIndex((stage) => {
+      emitSse({ type: "conversation_index", stage, at: new Date().toISOString() });
+    });
+    app.log.info({ stats }, "conversation sidebar index ready");
+    if (resumeAfterWarm) {
+      await sendQueue.resume();
+      emitSse({ type: "queue_resumed", reason: "conversation_index_ready", at: new Date().toISOString() });
+    }
+  } catch (error) {
+    // Keep the queue paused: Start-chat fallback is still available after a
+    // manual resume, but an automatic resume without the index would recreate
+    // the slow/failure-prone behavior this warm-up is designed to prevent.
+    app.log.warn({ error }, "browser/index warm-up failed; queue remains paused");
+  }
+}
+
 async function main() {
   if (config.appEnv === "production" && !config.apiToken) {
     throw new Error("API_TOKEN is required when NODE_ENV=production.");
   }
   await loadSessions();
   await apiKeyStore.load();
+  const queueWasPaused = await sendQueue.isPaused().catch(() => true);
+  if (!queueWasPaused) await sendQueue.pause();
   startSendWorker();
   await reconcilePending().catch((error) => app.log.warn({ error: error.message }, "reconcile failed"));
   await app.listen({ host: config.host, port: config.port });
-  client.start().catch((error) => app.log.warn({ error }, "auto browser start failed"));
+  initializeBrowserAndConversationIndex({ resumeAfterWarm: !queueWasPaused });
 }
 
 async function shutdown(signal) {

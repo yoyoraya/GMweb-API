@@ -43,6 +43,13 @@ class GoogleMessagesClient extends EventEmitter {
     // Worker pacing alone cannot protect against those internal retries.
     this.conversationOpenIntervalMs = Math.max(1000, Number(config.sendMinIntervalMs) || 15000);
     this.lastConversationOpenAt = 0;
+    // A warm index of the sidebar lets sends open existing threads with one
+    // SPA click instead of repeatedly invoking Google's new-conversation flow.
+    this.sidebarConversationIndex = new Map();
+    this.sidebarIndexReady = false;
+    this.sidebarIndexWarmPromise = null;
+    this.sidebarIndexStats = { rows: 0, batches: 0, reachedPreviousYear: false };
+    this.conversationHistoryMaxBatches = Math.max(1, Number(config.conversationHistoryMaxBatches) || 80);
   }
 
   async start() {
@@ -83,10 +90,17 @@ class GoogleMessagesClient extends EventEmitter {
       this.stopRotationGuard();
     });
 
-    this.page = this.context.pages()[0] || await this.context.newPage();
+    const existingPages = this.context.pages();
+    this.page = existingPages.find((candidate) => candidate.url().startsWith(MESSAGES_URL)) ||
+      existingPages[0] || await this.context.newPage();
     this.page.setDefaultTimeout(15000);
-    await this.page.goto(MESSAGES_URL, { waitUntil: "domcontentloaded" });
-    await this.page.waitForLoadState("domcontentloaded").catch(() => {});
+    // Reconnecting to the externally-owned Chrome must not reload a healthy
+    // Messages SPA. A full goto produces the long splash/loading screen and
+    // discards the already-loaded sidebar history.
+    if (!this.page.url().startsWith(MESSAGES_URL)) {
+      await this.page.goto(MESSAGES_URL, { waitUntil: "domcontentloaded" });
+      await this.page.waitForLoadState("domcontentloaded").catch(() => {});
+    }
     this.startedAt = new Date().toISOString();
     this.startPolling();
     this.startRotationGuard();
@@ -230,7 +244,7 @@ class GoogleMessagesClient extends EventEmitter {
 
   // Try, in order, to open the recipient's conversation. Returns true on success.
   // onStage reports which step is being attempted so the ledger can show progress.
-  async openForSend(to, onStage) {
+  async openForSend(to, onStage, { restartNewConversation = false } = {}) {
     const page = await this.ensurePage();
 
     // 1. Already viewing this recipient's conversation? Skip straight to send.
@@ -252,7 +266,7 @@ class GoogleMessagesClient extends EventEmitter {
     }
     this.lastConversationOpenAt = Date.now();
     onStage?.("start_chat");
-    if (await this.startChatFlow(to, onStage)) return true;
+    if (await this.startChatFlow(to, onStage, { forceRestart: restartNewConversation })) return true;
     if (await this.conversationCreationRateLimited()) {
       const error = new Error("Google Messages asked us to wait before creating more conversations.");
       error.code = "GOOGLE_CONVERSATION_RATE_LIMIT";
@@ -282,18 +296,14 @@ class GoogleMessagesClient extends EventEmitter {
     stage("checking_paired");
     await this.ensurePaired();
 
-    // GM web wedges mid-task (stuck on /conversations/new with no composer;
-    // spontaneous reloads to the splash; an Enter that silently does nothing).
-    // So the whole send — open, type, AND verify it actually left the composer —
-    // is one retryable unit. On any failure we reload to a clean view and retry
-    // (up to 3x). Before retyping we check the thread's last outgoing message, so
-    // a reload-retry never double-sends a message that already went out.
+    // The whole send is retryable, but retries stay inside the SPA. Reloading
+    // Messages here causes a long resync and loses the warm sidebar index.
     let sent = false;
     for (let attempt = 1; attempt <= 3 && !sent; attempt++) {
-      stage(attempt === 1 ? "opening" : `reload_retry_${attempt}`);
+      stage(attempt === 1 ? "opening" : `ui_retry_${attempt}`);
       let opened = false;
       try {
-        opened = await this.openForSend(to, stage);
+        opened = await this.openForSend(to, stage, { restartNewConversation: attempt > 1 });
       } catch (error) {
         // This is an explicit Google anti-abuse response, not a wedged page.
         // Retrying immediately would create more conversations and extend the
@@ -314,17 +324,17 @@ class GoogleMessagesClient extends EventEmitter {
         stage("send_unverified");
       }
 
-      // Not opened, or the send couldn't be verified — reload and retry.
-      stage("stuck_reloading");
-      await page.goto(`${MESSAGES_URL}/conversations`, { waitUntil: "domcontentloaded" }).catch(() => {});
-      await this.waitForAppReady(9000);
-      await this.ensurePaired().catch(() => {});
+      // A selected-recipient chip with no composer is a known Google UI miss.
+      // The next attempt clicks Start chat again and re-enters the number.
+      stage("retrying_without_reload");
+      await page.waitForTimeout(500);
     }
 
     if (!sent) {
       stage("failed");
-      const error = new Error(`Send to ${to} failed after 3 attempts (could not open or verify).`);
-      error.statusCode = 502;
+      const error = new Error(`Send to ${to} could not open a conversation after 3 UI attempts.`);
+      error.code = "CONVERSATION_OPEN_DEFER";
+      error.statusCode = 503;
       throw error;
     }
 
@@ -375,14 +385,20 @@ class GoogleMessagesClient extends EventEmitter {
   async openExistingConversation(to) {
     const page = await this.ensurePage();
 
-    // Shallow pass — recent customers are near the top, no scroll needed.
-    let conversations = await this.listConversationsUnlocked(15);
-    let match = conversations.find((c) => this.conversationMatchesRecipient(c, to));
-
-    // Deep pass — scroll the sidebar to load the full history, then re-match.
+    // Persistent recipient cache is the cheapest path; the warm in-memory
+    // sidebar index covers every conversation loaded for the current year.
+    const cached = this.getCachedRecipientConversation(to);
+    let match = cached?.href ? { href: cached.href, title: cached.title || "", text: cached.title || "" } : null;
     if (!match) {
-      conversations = await this.listConversationsUnlocked(300);
-      match = conversations.find((c) => this.conversationMatchesRecipient(c, to));
+      match = [...this.sidebarConversationIndex.values()]
+        .find((conversation) => this.conversationMatchesRecipient(conversation, to));
+    }
+    // While the background warm-up is still running, include whatever is
+    // already rendered without triggering a per-message deep scan.
+    if (!match) {
+      const visible = await this.listConversationsUnlocked(120, { loadMore: false });
+      this.mergeSidebarConversationIndex(visible);
+      match = visible.find((conversation) => this.conversationMatchesRecipient(conversation, to));
     }
     if (!match?.href) return false;
 
@@ -404,12 +420,13 @@ class GoogleMessagesClient extends EventEmitter {
 
   // Open a conversation purely through the "Start chat" UI — no page reload.
   // Works for ANY number regardless of whether it is visible in the sidebar.
-  async startChatFlow(to, onStage) {
+  async startChatFlow(to, onStage, { forceRestart = false } = {}) {
     const page = await this.ensurePage();
     try {
       // Reuse an already-open New conversation screen. Clicking Start chat
       // again can reset the recipient field while Google is still rendering it.
-      if (!/\/conversations\/new(?:[/?#]|$)/i.test(page.url())) {
+      if (forceRestart || !/\/conversations\/new(?:[/?#]|$)/i.test(page.url())) {
+        onStage?.(forceRestart ? "restarting_start_chat" : "opening_start_chat");
         await this.clickFirst([
           "[aria-label*='Start chat' i]",
           "[aria-label*='Start conversation' i]",
@@ -446,7 +463,12 @@ class GoogleMessagesClient extends EventEmitter {
       // way) — it returns true only once the composer actually opened. Enter is a
       // last-resort fallback for layouts where no row is clickable.
       onStage?.("selecting_recipient");
-      if (await this.clickRecipientOption(to)) return true;
+      const selection = await this.clickRecipientOption(to);
+      if (selection === "opened") return true;
+      // The screenshot case: Google accepted the recipient and rendered a chip,
+      // but never transitioned to the composer. Do not keep clicking the chip;
+      // let the next attempt reset Start chat and enter the number again.
+      if (selection === "selected") return false;
       await recipientInput.press("Enter").catch(() => {});
       return await this.composerReady(5000);
     } catch {
@@ -566,56 +588,118 @@ class GoogleMessagesClient extends EventEmitter {
     return this.withBrowserLock(() => this.listConversationsUnlocked(limit));
   }
 
+  mergeSidebarConversationIndex(rows) {
+    for (const row of rows || []) {
+      if (row?.href) this.sidebarConversationIndex.set(row.href, row);
+    }
+  }
+
+  timestampIsBeforeCurrentYear(timestamp) {
+    const currentYear = new Date().getFullYear();
+    const years = String(timestamp || "").match(/\b20\d{2}\b/g) || [];
+    return years.some((year) => Number(year) < currentYear);
+  }
+
+  async clickLoadMoreConversations(page) {
+    const loadMore = page.locator("button.load-more", { hasText: /Load more conversations/i }).first();
+    const attached = await loadMore.waitFor({ state: "attached", timeout: 8000 })
+      .then(() => true).catch(() => false);
+    if (!attached) return false;
+    // After several batches Google keeps the live button in the DOM but moves
+    // it to x=-9999 while virtualizing the sidebar. A physical Playwright click
+    // then fails even though the button's own handler remains usable.
+    return loadMore.evaluate((button) => {
+      button.click();
+      return true;
+    }).catch(() => false);
+  }
+
+  async warmConversationIndex(onStage) {
+    if (this.sidebarIndexReady) return this.sidebarIndexStats;
+    if (this.sidebarIndexWarmPromise) return this.sidebarIndexWarmPromise;
+    this.sidebarIndexWarmPromise = this.withBrowserLock(
+      () => this.preloadConversationIndexUnlocked(onStage),
+      { timeoutMs: 600000 }
+    ).finally(() => { this.sidebarIndexWarmPromise = null; });
+    return this.sidebarIndexWarmPromise;
+  }
+
+  async preloadConversationIndexUnlocked(onStage) {
+    const page = await this.ensurePage();
+    await this.ensurePaired();
+    onStage?.("sidebar_indexing");
+
+    let batches = 0;
+    let stalls = 0;
+    let reachedPreviousYear = false;
+    for (; batches < this.conversationHistoryMaxBatches; batches++) {
+      const rows = await this.listConversationsUnlocked(1000, { loadMore: false });
+      this.mergeSidebarConversationIndex(rows);
+      reachedPreviousYear = rows.some((row) => this.timestampIsBeforeCurrentYear(row.timestamp));
+      if (reachedPreviousYear) break;
+
+      const before = rows.length;
+      await page.evaluate(() => {
+        const scroller = document.querySelector("nav.conversation-list");
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }).catch(() => {});
+      // Rows arrive before Google re-renders this button. Treating that brief
+      // gap as end-of-history stopped the warm-up after only a few batches.
+      if (!await this.clickLoadMoreConversations(page)) break;
+      const grew = await page.waitForFunction(
+        (count) => document.querySelectorAll("mws-conversation-list-item").length > count,
+        before,
+        { timeout: 8000 }
+      ).then(() => true).catch(() => false);
+      if (!grew) {
+        if (++stalls >= 2) break;
+      } else {
+        stalls = 0;
+      }
+    }
+
+    await page.evaluate(() => {
+      const scroller = document.querySelector("nav.conversation-list");
+      if (scroller) scroller.scrollTop = 0;
+    }).catch(() => {});
+    this.sidebarIndexReady = true;
+    this.sidebarIndexStats = {
+      rows: this.sidebarConversationIndex.size,
+      batches,
+      reachedPreviousYear
+    };
+    onStage?.("sidebar_index_ready");
+    return this.sidebarIndexStats;
+  }
+
   // The GM web sidebar lazy-loads conversations on scroll. Scroll the list
   // container down until we have `target` items rendered or no more load in.
   // Cheap when enough items are already present (the loop exits immediately).
   async loadConversationListItems(page, target) {
-    await page.evaluate(async (want) => {
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const countItems = () => document.querySelectorAll(
-        "mws-conversation-list-item, a[href*='/web/conversations/']"
-      ).length;
-
-      // Find the scrollable ancestor that actually holds the conversation list.
-      const findScroller = () => {
-        const item = document.querySelector("mws-conversation-list-item, a[href*='/web/conversations/']");
-        let node = item?.parentElement;
-        while (node && node !== document.body) {
-          const style = getComputedStyle(node);
-          if ((style.overflowY === "auto" || style.overflowY === "scroll") &&
-              node.scrollHeight > node.clientHeight + 4) {
-            return node;
-          }
-          node = node.parentElement;
-        }
-        return null;
-      };
-
-      const scroller = findScroller();
-      if (!scroller) return;
-
-      let last = -1;
-      let stalls = 0;
-      // High iteration cap supports hundreds of conversations; the loop exits
-      // early as soon as the list stops growing (with a small tolerance for
-      // lazy-load lag).
-      for (let i = 0; i < 250; i++) {
-        if (countItems() >= want) break;
-        scroller.scrollTop = scroller.scrollHeight;
-        await sleep(300);
-        const now = countItems();
-        if (now === last) {
-          if (++stalls >= 2) break; // two no-growth cycles → reached the end
-        } else {
-          stalls = 0;
-          last = now;
-        }
-      }
-      scroller.scrollTop = 0; // restore the list to the top
-    }, target).catch(() => {});
+    let stalls = 0;
+    for (let i = 0; i < this.conversationHistoryMaxBatches; i++) {
+      const before = await page.locator("mws-conversation-list-item").count();
+      if (before >= target) break;
+      await page.evaluate(() => {
+        const scroller = document.querySelector("nav.conversation-list");
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }).catch(() => {});
+      if (!await this.clickLoadMoreConversations(page)) break;
+      const grew = await page.waitForFunction(
+        (count) => document.querySelectorAll("mws-conversation-list-item").length > count,
+        before,
+        { timeout: 8000 }
+      ).then(() => true).catch(() => false);
+      if (!grew && ++stalls >= 2) break;
+      if (grew) stalls = 0;
+    }
+    await page.evaluate(() => {
+      const scroller = document.querySelector("nav.conversation-list");
+      if (scroller) scroller.scrollTop = 0;
+    }).catch(() => {});
   }
 
-  async listConversationsUnlocked(limit = 20) {
+  async listConversationsUnlocked(limit = 20, { loadMore = limit > 15 } = {}) {
     const page = await this.ensurePage();
     if (!/\/web\/conversations/.test(page.url())) {
       await page.goto(`${MESSAGES_URL}/conversations`, { waitUntil: "domcontentloaded" }).catch(() => {});
@@ -633,7 +717,7 @@ class GoogleMessagesClient extends EventEmitter {
 
     // Lazy-load more rows only when the caller wants a large list (dashboard,
     // recipient lookup). Polling (small limit) skips this to stay fast.
-    if (limit > 15) {
+    if (loadMore) {
       await this.loadConversationListItems(page, limit);
     }
 
@@ -744,6 +828,7 @@ class GoogleMessagesClient extends EventEmitter {
         .map(({ id, index, text }) => ({ id, index, href: "", title: text, snippet: "", timestamp: "", text }));
     }, limit);
 
+    this.mergeSidebarConversationIndex(rows);
     return rows;
   }
 
@@ -826,8 +911,8 @@ class GoogleMessagesClient extends EventEmitter {
     const convId = href.split("/").pop();
     try {
       const link = page.locator(`a[href*="${convId}"]`).first();
-      const visible = await link.isVisible({ timeout: 1500 });
-      if (!visible) return false;
+      await link.waitFor({ state: "attached", timeout: 1500 });
+      await link.scrollIntoViewIfNeeded().catch(() => {});
       await link.click();
       return true;
     } catch {
@@ -933,17 +1018,18 @@ class GoogleMessagesClient extends EventEmitter {
       `text=${local}`
     ];
 
-    for (const sel of selectors) {
-      try {
-        const loc = page.locator(sel).first();
-        await loc.waitFor({ state: "visible", timeout: 1500 });
-        await loc.click({ timeout: 1500 });
-        if (await this.composerReady(5000)) return true; // confirmed: thread opened
-      } catch {
-        // Not this row — try the next.
-      }
+    let option;
+    try {
+      // Race all selectors and click exactly one result. The old sequential
+      // loop could spend 40+ seconds clicking the same selected chip through
+      // different selectors.
+      option = await this.locatorFirst(selectors);
+      await option.click({ timeout: 1500 });
+    } catch {
+      return "missing";
     }
-    return false;
+    if (await this.composerReady(4500)) return "opened";
+    return "selected";
   }
 
   async extractMessagesFromPage(page, limit) {

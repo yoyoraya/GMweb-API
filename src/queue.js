@@ -1,6 +1,9 @@
 const { Queue, Worker, QueueEvents } = require("bullmq");
 
 const QUEUE_NAME = "gmweb-send";
+const DEFERRED_HIGH_KEY = "gmweb-send:deferred-high";
+const SUCCESS_SEQUENCE_KEY = "gmweb-send:success-sequence";
+const HIGH_DEFER_DELAY_MS = 365 * 24 * 60 * 60 * 1000;
 
 // Shared Redis connection options. `maxRetriesPerRequest: null` is required by
 // BullMQ for the blocking connections used by Worker and QueueEvents.
@@ -28,6 +31,53 @@ class SendQueue {
 
   enqueue(data, opts = {}) {
     return this.queue.add("send", data, opts);
+  }
+
+  deferNormal(data) {
+    return this.enqueue({
+      ...data,
+      priority: "normal",
+      deferCount: Number(data?.deferCount || 0) + 1
+    });
+  }
+
+  async deferHigh(data, successes = 10) {
+    const client = await this._redis();
+    const sequence = Number(await client.get(SUCCESS_SEQUENCE_KEY)) || 0;
+    const job = await this.enqueue({
+      ...data,
+      priority: "high",
+      deferCount: Number(data?.deferCount || 0) + 1
+    }, {
+      lifo: true,
+      // Keep a real BullMQ job so the ledger and dashboard remain durable.
+      // recordSuccessAndReleaseHigh promotes it after the success threshold.
+      delay: HIGH_DEFER_DELAY_MS
+    });
+    const releaseAt = sequence + Math.max(1, Number(successes) || 10);
+    await client.zadd(DEFERRED_HIGH_KEY, releaseAt, String(job.id));
+    return { job, releaseAt };
+  }
+
+  async recordSuccessAndReleaseHigh() {
+    const client = await this._redis();
+    const sequence = Number(await client.incr(SUCCESS_SEQUENCE_KEY));
+    // Release at most one due high-priority retry per successful send so a
+    // group of deferred highs cannot form a new burst.
+    const due = await client.zrangebyscore(DEFERRED_HIGH_KEY, "-inf", sequence, "LIMIT", 0, 1);
+    if (!due.length) return { sequence, released: null };
+    const id = String(due[0]);
+    const job = await this.queue.getJob(id);
+    if (job && await job.getState().catch(() => "") === "delayed") {
+      await job.promote();
+    }
+    await client.zrem(DEFERRED_HIGH_KEY, id);
+    return { sequence, released: job || null };
+  }
+
+  async forgetDeferredHigh(id) {
+    const client = await this._redis();
+    await client.zrem(DEFERRED_HIGH_KEY, String(id));
   }
 
   // --- Idempotency (dedupe POST /send retries) ---------------------------
@@ -148,7 +198,7 @@ class SendQueue {
         to: job.data?.to || null,
         textPreview: String(job.data?.text || "").replace(/\s+/g, " ").slice(0, 80),
         keyName: job.data?.keyName || null,
-        priority: job.opts?.lifo ? "high" : "normal",
+        priority: job.data?.priority === "high" || job.opts?.lifo ? "high" : "normal",
         attemptsMade: job.attemptsMade || 0,
         createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null
       });
@@ -166,16 +216,18 @@ class SendQueue {
     if (state !== "waiting" && state !== "delayed") {
       return { promoted: false, reason: `job is ${state}`, state };
     }
-    const data = job.data;
+    const data = { ...job.data, priority: "high" };
+    await this.forgetDeferredHigh(id);
     await job.remove();
     const fresh = await this.queue.add("send", data, { lifo: true });
-    return { promoted: true, id: fresh.id, previousId: String(id), state: "waiting" };
+    return { promoted: true, id: fresh.id, previousId: String(id), state: "waiting", _data: data };
   }
 
   // Remove a job from the queue (cancel a pending send).
   async removeJob(id) {
     const job = await this.queue.getJob(id);
     if (!job) return false;
+    await this.forgetDeferredHigh(id);
     await job.remove();
     return true;
   }

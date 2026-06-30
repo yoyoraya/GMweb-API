@@ -214,6 +214,7 @@ SEND_TIMEOUT_MS=80000
 SEND_FAIL_RESTART_THRESHOLD=3
 SEND_MIN_INTERVAL_MS=15000
 SEND_MAX_PER_MINUTE=4
+CONVERSATION_HISTORY_MAX_BATCHES=80
 ENV
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"; chmod 600 "$APP_DIR/.env"
   printf '%s' "$pass" >"$STATE_DIR/dashboard-password.txt"; chmod 600 "$STATE_DIR/dashboard-password.txt"
