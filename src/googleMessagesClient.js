@@ -111,6 +111,18 @@ class GoogleMessagesClient extends EventEmitter {
     return this.withBrowserLock(() => this.stopUnlocked());
   }
 
+  detachForShutdown() {
+    // The Chrome process is external in connect mode. During a long sidebar
+    // warm-up, waiting for the browser lock makes systemd kill the API after
+    // its stop timeout. Dropping our references is enough because this process
+    // is about to exit and must not close the shared Chrome.
+    this.stopPolling();
+    this.stopRotationGuard();
+    this.browser = null;
+    this.context = null;
+    this.page = null;
+  }
+
   async stopUnlocked() {
     this.stopPolling();
     this.stopRotationGuard();

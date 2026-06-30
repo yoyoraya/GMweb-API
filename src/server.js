@@ -2100,6 +2100,10 @@ async function reconcilePending() {
 async function initializeBrowserAndConversationIndex({ resumeAfterWarm }) {
   try {
     await client.start();
+    // Seed readiness before the long index lock. Without this, /ready has no
+    // cached paired state and the system watchdog may restart Chrome midway
+    // through a perfectly healthy sidebar warm-up.
+    await client.status();
     const stats = await client.warmConversationIndex((stage) => {
       emitSse({ type: "conversation_index", stage, at: new Date().toISOString() });
     });
@@ -2134,7 +2138,8 @@ async function shutdown(signal) {
   app.log.info({ signal }, "shutting down");
   await sendQueue.close().catch((error) => app.log.warn({ error }, "queue close failed"));
   try { sendStore.close(); } catch (error) { app.log.warn({ error }, "ledger close failed"); }
-  await client.stop().catch((error) => app.log.warn({ error }, "browser stop failed"));
+  if (config.browserMode === "connect") client.detachForShutdown();
+  else await client.stop().catch((error) => app.log.warn({ error }, "browser stop failed"));
   await app.close().catch((error) => app.log.warn({ error }, "server close failed"));
   process.exit(0);
 }
