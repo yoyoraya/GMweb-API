@@ -220,64 +220,81 @@ class GoogleMessagesClient extends EventEmitter {
     return page.screenshot({ fullPage: true, type: "png" });
   }
 
-  async sendMessage({ to, text }) {
-    return this.withBrowserLock(() => this.sendMessageUnlocked({ to, text }));
+  async sendMessage({ to, text, onStage }) {
+    return this.withBrowserLock(() => this.sendMessageUnlocked({ to, text, onStage }));
   }
 
-  async sendMessageUnlocked({ to, text }) {
-    if (!to || !text) throw new Error("Both 'to' and 'text' are required.");
+  // Try, in order, to open the recipient's conversation. Returns true on success.
+  // onStage reports which step is being attempted so the ledger can show progress.
+  async openForSend(to, onStage) {
     const page = await this.ensurePage();
-    await page.bringToFront().catch(() => {});
-    await this.ensurePaired();
-
-    // Priority order — prefer SPA navigation, avoid reloads & the fragile
-    // Start-chat flow whenever the customer already has a conversation:
-    //   1. Already on this conversation     → type & send (instant)
-    //   2. Existing conversation in sidebar → scroll-find + click (SPA, no reload)
-    //   3. Start-chat UI flow               → only for genuinely NEW numbers
-    //   4. Open by URL                      → last-resort reload
-    let opened = false;
-    let fastPath = false;
 
     // 1. Already viewing this recipient's conversation? Skip straight to send.
     const cached = this.getCachedRecipientConversation(to);
     if (cached?.href) {
       const convId = cached.href.split("/").pop();
-      if (convId && page.url().includes(convId) && await this.composerReady(1500)) {
-        opened = true;
-        fastPath = true;
-      }
+      if (convId && page.url().includes(convId) && await this.composerReady(1200)) return true;
     }
 
-    // 2. Existing conversation — find it in the sidebar and click it (no reload).
-    if (!opened) {
-      opened = await this.openExistingConversation(to);
+    // 2. Existing conversation — find it in the sidebar and click it (SPA, no reload).
+    onStage?.("locating");
+    if (await this.openExistingConversation(to)) return true;
+
+    // 3. New number — Start-chat UI flow.
+    onStage?.("start_chat");
+    if (await this.startChatFlow(to)) return true;
+
+    // 4. Last resort — open the conversation by URL.
+    onStage?.("open_by_url");
+    if (await this.openConversationByUrl(to)) return true;
+
+    return false;
+  }
+
+  async sendMessageUnlocked({ to, text, onStage }) {
+    if (!to || !text) throw new Error("Both 'to' and 'text' are required.");
+    const stage = (s) => { try { onStage?.(s); } catch { /* ignore */ } };
+
+    const page = await this.ensurePage();
+    await page.bringToFront().catch(() => {});
+    stage("checking_paired");
+    await this.ensurePaired();
+
+    // Google Messages web frequently wedges mid-task (e.g. stuck on
+    // /conversations/new with the recipient typed but no composer). So we treat
+    // "open the conversation" as a retryable stage: try it up to 3 times, and
+    // between failures RELOAD the page to clear the wedged state, then retry.
+    let opened = false;
+    for (let attempt = 1; attempt <= 3 && !opened; attempt++) {
+      stage(attempt === 1 ? "opening" : `reload_retry_${attempt}`);
+      opened = await this.openForSend(to, stage).catch(() => false);
+      if (opened) break;
+
+      // Stuck — reload the app to a clean conversations view and try again.
+      stage("stuck_reloading");
+      await page.goto(`${MESSAGES_URL}/conversations`, { waitUntil: "domcontentloaded" }).catch(() => {});
+      await page.waitForLoadState("domcontentloaded").catch(() => {});
+      await this.composerReady(8000).catch(() => {});
+      await this.ensurePaired().catch(() => {});
     }
 
-    // 3. New number — Start-chat UI flow (no existing thread to click).
     if (!opened) {
-      opened = await this.startChatFlow(to);
-    }
-
-    // 4. Last resort — navigate by URL (full reload).
-    if (!opened) {
-      opened = await this.openConversationByUrl(to);
-    }
-
-    if (!opened) {
-      const error = new Error(`Could not open a conversation for ${to}.`);
+      stage("failed");
+      const error = new Error(`Could not open a conversation for ${to} after 3 attempts (reload-recovery exhausted).`);
       error.statusCode = 502;
       throw error;
     }
 
+    stage("composer_ready");
+    stage("typing");
     await this.typeAndSend(text);
+    stage("sent");
     this.cacheRecipientConversation(to, page.url());
 
     const event = {
       type: "sent",
       to,
       text,
-      fastPath,
       at: new Date().toISOString()
     };
     this.emit("message:sent", event);

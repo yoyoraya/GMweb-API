@@ -3,7 +3,7 @@
   "info": {
     "title": "GMweb API",
     "description": "Google Messages SMS/RCS gateway — control Google Messages Web via a REST API.\n\n## Authentication\nAll endpoints (except `/health`) require a Bearer token in the `Authorization` header.\n\nTwo token types are accepted:\n- **Master token** (`API_TOKEN` env var) — full access to all endpoints including admin and key management.\n- **Project API key** (`gmw_...`) — access to messaging & conversation endpoints only. Admin routes return 401.\n\n```\nAuthorization: Bearer gmw_your_project_token\n```\n\n## Rate Limits\nProject keys have configurable per-minute and per-hour send limits.\nRepeated auth failures from an IP trigger a 30-minute block.",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "contact": {
       "name": "GMweb API"
     }
@@ -1428,6 +1428,13 @@
                           },
                           "status": {
                             "type": "string"
+                          },
+                          "stage": {
+                            "type": [
+                              "null",
+                              "string"
+                            ],
+                            "description": "Granular progress within an active send (opening, locating, start_chat, stuck_reloading, composer_ready, typing, sent...)"
                           },
                           "attempts": {
                             "type": "integer"

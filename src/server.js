@@ -431,7 +431,15 @@ function startSendWorker() {
     async (job) => {
       // Runs in-process; shares the single Playwright browser via withBrowserLock.
       const result = await Promise.race([
-        client.sendMessage({ to: job.data.to, text: job.data.text }),
+        client.sendMessage({
+          to: job.data.to,
+          text: job.data.text,
+          // Per-message progress: record the stage in the ledger and stream it.
+          onStage: (s) => {
+            sendStore.markStage(job.id, s);
+            emitSse({ type: "send_stage", jobId: job.id, to: job.data?.to, stage: s, at: new Date().toISOString() });
+          }
+        }),
         new Promise((_, reject) => setTimeout(() => reject(new Error("send_timeout")), SEND_TIMEOUT_MS))
       ]);
       sendFailStreak = 0; // a success clears the streak
@@ -1597,6 +1605,7 @@ app.get("/admin/sends", {
                 keyName: { type: ["string", "null"] },
                 jobId: { type: ["string", "null"] },
                 status: { type: "string" },
+                stage: { type: ["string", "null"], description: "Granular progress within an active send (opening, locating, start_chat, stuck_reloading, composer_ready, typing, sent...)" },
                 attempts: { type: "integer" },
                 error: { type: ["string", "null"] },
                 createdAt: { type: ["string", "null"] },
@@ -1617,6 +1626,7 @@ app.get("/admin/sends", {
     keyName: r.key_name,
     jobId: r.job_id,
     status: r.status,
+    stage: r.stage || null,
     attempts: r.attempts,
     error: r.error,
     createdAt: r.created_at ? new Date(r.created_at).toISOString() : null,

@@ -32,6 +32,7 @@ class SendStore {
         key_name    TEXT,
         job_id      TEXT,
         status      TEXT NOT NULL,           -- queued | active | sent | failed | suppressed
+        stage       TEXT,                    -- granular progress: opening | locating | start_chat | composer_ready | typing | sent | stuck_reload ...
         attempts    INTEGER NOT NULL DEFAULT 0,
         error       TEXT,
         created_at  INTEGER NOT NULL,
@@ -42,6 +43,8 @@ class SendStore {
       CREATE INDEX IF NOT EXISTS idx_sends_job     ON sends (job_id);
       CREATE INDEX IF NOT EXISTS idx_sends_status  ON sends (status);
     `);
+    // Migrate older DBs created before the stage column existed.
+    try { this.db.exec("ALTER TABLE sends ADD COLUMN stage TEXT"); } catch { /* already present */ }
 
     this._insert = this.db.prepare(
       `INSERT INTO sends (dedupe_key, to_number, text, key_name, status, created_at, updated_at)
@@ -55,6 +58,7 @@ class SendStore {
     );
     this._attach = this.db.prepare(`UPDATE sends SET job_id=?, updated_at=? WHERE id=?`);
     this._setById = this.db.prepare(`UPDATE sends SET status=?, error=?, updated_at=? WHERE id=?`);
+    this._setStage = this.db.prepare(`UPDATE sends SET stage=?, updated_at=? WHERE job_id=?`);
     this._byJob = this.db.prepare(`SELECT * FROM sends WHERE job_id=? ORDER BY id DESC LIMIT 1`);
     this._setStatusByJob = this.db.prepare(
       `UPDATE sends SET status=@status, attempts=@attempts, error=@error, updated_at=@now,
@@ -94,6 +98,12 @@ class SendStore {
 
   markById(id, status, error = null) {
     this._setById.run(status, error, Date.now(), id);
+  }
+
+  // Record the granular send stage (which step the message is on right now).
+  markStage(jobId, stage) {
+    if (!jobId) return;
+    this._setStage.run(stage, Date.now(), String(jobId));
   }
 
   markStatus(jobId, status, { attempts = 0, error = null } = {}) {
