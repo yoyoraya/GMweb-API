@@ -1358,6 +1358,7 @@ app.post("/send", {
           ok: { type: "boolean" },
           jobId: { type: ["string", "null"] },
           status: { type: "string", enum: ["completed", "duplicate_suppressed"] },
+          reason: { type: "string", enum: ["duplicate_suppressed", "duplicate_inflight"], description: "Why a send was suppressed: already sent within the window, or still in flight." },
           deduped: { type: "boolean" },
           priority: { type: "string", enum: ["high", "normal"] },
           result: { type: "object" }
