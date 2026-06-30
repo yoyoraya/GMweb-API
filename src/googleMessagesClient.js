@@ -48,6 +48,7 @@ class GoogleMessagesClient extends EventEmitter {
     this.sidebarConversationIndex = new Map();
     this.sidebarIndexReady = false;
     this.sidebarIndexWarmPromise = null;
+    this.statusRefreshPromise = null;
     this.sidebarIndexStats = { rows: 0, batches: 0, reachedPreviousYear: false };
     this.conversationHistoryMaxBatches = Math.max(1, Number(config.conversationHistoryMaxBatches) || 80);
   }
@@ -204,6 +205,14 @@ class GoogleMessagesClient extends EventEmitter {
     ]);
   }
 
+  refreshStatusInBackground() {
+    if (this.sidebarIndexWarmPromise || this.statusRefreshPromise) return this.statusRefreshPromise;
+    this.statusRefreshPromise = this.status()
+      .catch(() => null)
+      .finally(() => { this.statusRefreshPromise = null; });
+    return this.statusRefreshPromise;
+  }
+
   // Non-blocking status for dashboard/readiness. Serves a fresh-enough cache
   // immediately; otherwise tries a time-boxed live read; otherwise stale cache.
   async statusForDashboard({ maxAgeMs = 15000, timeoutMs = 5000 } = {}) {
@@ -212,7 +221,10 @@ class GoogleMessagesClient extends EventEmitter {
       // Always answer instantly from cache so the dashboard never blocks behind
       // in-flight sends. If the cache is getting old (the poller may be starved
       // during a send burst), kick a background refresh for the next read.
-      if (cached.ageMs >= maxAgeMs) this.status().catch(() => {});
+      // Dashboard polling must not enqueue one status read per request behind
+      // a long sidebar index. Keep refreshes single-flight and skip them while
+      // the warm-up owns the browser lock.
+      if (cached.ageMs >= maxAgeMs) this.refreshStatusInBackground();
       return cached.ageMs >= maxAgeMs ? { ...cached, stale: true } : cached;
     }
     // Cold start only (no cache yet): time-boxed live read, never hangs.

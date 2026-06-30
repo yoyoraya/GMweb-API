@@ -93,3 +93,27 @@ test("previous-year timestamps stop sidebar warm-up", () => {
   assert.equal(c.timestampIsBeforeCurrentYear("Jun 30"), false);
   assert.equal(c.timestampIsBeforeCurrentYear(String(new Date().getFullYear() - 1)), true);
 });
+
+test("dashboard status refresh is single-flight and skipped during sidebar warm-up", async () => {
+  const c = client();
+  c.lastStatus = { paired: true };
+  c.lastStatusAt = 0;
+  let calls = 0;
+  let release;
+  c.status = async () => {
+    calls += 1;
+    await new Promise((resolve) => { release = resolve; });
+    return { paired: true };
+  };
+
+  c.sidebarIndexWarmPromise = Promise.resolve();
+  await c.statusForDashboard({ maxAgeMs: 0 });
+  assert.equal(calls, 0);
+
+  c.sidebarIndexWarmPromise = null;
+  await c.statusForDashboard({ maxAgeMs: 0 });
+  await c.statusForDashboard({ maxAgeMs: 0 });
+  assert.equal(calls, 1);
+  release();
+  await c.statusRefreshPromise;
+});
