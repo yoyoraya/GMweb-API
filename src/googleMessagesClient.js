@@ -260,35 +260,41 @@ class GoogleMessagesClient extends EventEmitter {
     stage("checking_paired");
     await this.ensurePaired();
 
-    // Google Messages web frequently wedges mid-task (e.g. stuck on
-    // /conversations/new with the recipient typed but no composer). So we treat
-    // "open the conversation" as a retryable stage: try it up to 3 times, and
-    // between failures RELOAD the page to clear the wedged state, then retry.
-    let opened = false;
-    for (let attempt = 1; attempt <= 3 && !opened; attempt++) {
+    // GM web wedges mid-task (stuck on /conversations/new with no composer;
+    // spontaneous reloads to the splash; an Enter that silently does nothing).
+    // So the whole send — open, type, AND verify it actually left the composer —
+    // is one retryable unit. On any failure we reload to a clean view and retry
+    // (up to 3x). Before retyping we check the thread's last outgoing message, so
+    // a reload-retry never double-sends a message that already went out.
+    let sent = false;
+    for (let attempt = 1; attempt <= 3 && !sent; attempt++) {
       stage(attempt === 1 ? "opening" : `reload_retry_${attempt}`);
-      opened = await this.openForSend(to, stage).catch(() => false);
-      if (opened) break;
+      const opened = await this.openForSend(to, stage).catch(() => false);
 
-      // Stuck — reload the app to a clean conversations view and try again.
+      if (opened) {
+        // Dup-guard (retries only): a previous attempt may already have delivered
+        // this text — if so, don't send it again.
+        if (attempt > 1 && await this.lastOutgoingMatches(text)) { stage("already_sent"); sent = true; break; }
+        stage("typing");
+        sent = await this.typeAndSend(text).catch(() => false);
+        if (sent) { stage("sent"); break; }
+        stage("send_unverified");
+      }
+
+      // Not opened, or the send couldn't be verified — reload and retry.
       stage("stuck_reloading");
       await page.goto(`${MESSAGES_URL}/conversations`, { waitUntil: "domcontentloaded" }).catch(() => {});
-      await page.waitForLoadState("domcontentloaded").catch(() => {});
-      await this.composerReady(8000).catch(() => {});
+      await this.waitForAppReady(9000);
       await this.ensurePaired().catch(() => {});
     }
 
-    if (!opened) {
+    if (!sent) {
       stage("failed");
-      const error = new Error(`Could not open a conversation for ${to} after 3 attempts (reload-recovery exhausted).`);
+      const error = new Error(`Send to ${to} failed after 3 attempts (could not open or verify).`);
       error.statusCode = 502;
       throw error;
     }
 
-    stage("composer_ready");
-    stage("typing");
-    await this.typeAndSend(text);
-    stage("sent");
     this.cacheRecipientConversation(to, page.url());
 
     const event = {
@@ -301,14 +307,16 @@ class GoogleMessagesClient extends EventEmitter {
     return event;
   }
 
-  // Resolves true once the message composer/input is present in the DOM
-  // (i.e. a conversation is open and ready to type into).
+  // Resolves true once the real MESSAGE composer is present (a conversation is
+  // open and ready to type into). Deliberately strict — the Start-chat recipient
+  // box also matches a bare textarea/contenteditable, so we key on the
+  // message-specific aria-label/placeholder to avoid a false "ready".
   async composerReady(timeout = 2000) {
     const page = await this.ensurePage();
     try {
       await page.waitForFunction(() => {
         return !!document.querySelector(
-          "[aria-label*='Text message' i], [aria-label*='Message' i], textarea, [contenteditable='true']"
+          "[aria-label*='Text message' i], textarea[aria-label*='message' i], textarea[placeholder*='message' i], [contenteditable='true'][aria-label*='message' i]"
         );
       }, null, { timeout });
       return true;
@@ -420,27 +428,74 @@ class GoogleMessagesClient extends EventEmitter {
     }, null, { timeout }).catch(() => {});
   }
 
+  // Type the text into the REAL message composer (not the Start-chat recipient
+  // box) and press Enter. Returns true only once we VERIFY the send actually
+  // happened — GM clears the composer on a successful send, so an empty composer
+  // (or our text appearing as the last outgoing bubble) confirms it. A silent
+  // wedge (Enter does nothing) is reported as false so the caller can retry.
   async typeAndSend(text) {
     const page = await this.ensurePage();
     const messageInput = await this.locatorFirst([
       "[aria-label*='Text message' i]",
-      "[aria-label*='Message' i]",
       "textarea[aria-label*='message' i]",
       "textarea[placeholder*='message' i]",
-      "[contenteditable='true'][aria-label*='message' i]",
-      "[contenteditable='true']",
-      "textarea"
+      "[contenteditable='true'][aria-label*='message' i]"
     ]);
     await messageInput.fill(text).catch(async () => {
       await messageInput.click();
       await page.keyboard.type(text);
     });
-
-    // Send instantly. Enter is the native send key in Google Messages, so it fires
-    // the moment the text is in the composer — no waiting on the Send button to
-    // become visible/enabled (which previously cost up to 5s of locator polling).
-    // press() targets the already-focused composer directly.
     await messageInput.press("Enter");
+
+    // Verify: composer cleared OR our text is now the last outgoing message.
+    try {
+      await page.waitForFunction((sent) => {
+        const el = document.querySelector(
+          "[aria-label*='Text message' i], textarea[aria-label*='message' i], [contenteditable='true'][aria-label*='message' i]"
+        );
+        const composerEmpty = el ? ((el.value !== undefined ? el.value : el.textContent) || "").trim().length === 0 : false;
+        const bubbles = document.querySelectorAll("mws-text-message-part");
+        const last = bubbles[bubbles.length - 1];
+        const lastText = last ? (last.innerText || last.textContent || "").replace(/\s+/g, " ").trim() : "";
+        return composerEmpty || lastText === sent;
+      }, text.replace(/\s+/g, " ").trim(), { timeout: 8000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // True if the most recent OUTGOING bubble in the open thread equals `text` —
+  // used as a de-dupe guard before retyping on a reload-retry.
+  async lastOutgoingMatches(text) {
+    const page = await this.ensurePage();
+    const want = text.replace(/\s+/g, " ").trim();
+    try {
+      return await page.evaluate((wanted) => {
+        const out = [...document.querySelectorAll("mws-text-message-part")]
+          .filter((n) => {
+            const aria = n.getAttribute("aria-label") || "";
+            const rect = n.getBoundingClientRect();
+            return aria.startsWith("You said:") || rect.left > 720;
+          });
+        const last = out[out.length - 1];
+        const t = last ? (last.innerText || last.textContent || "").replace(/\s+/g, " ").trim() : "";
+        return t === wanted;
+      }, want);
+    } catch {
+      return false;
+    }
+  }
+
+  // Wait for the app shell (sidebar / composer) to be present after a load —
+  // i.e. NOT sitting on the blue "Messages" splash. Used after reloads.
+  async waitForAppReady(timeout = 9000) {
+    const page = await this.ensurePage();
+    await page.waitForFunction(() => {
+      return !!document.querySelector(
+        "mws-conversation-list-item, a[href*='/web/conversations/'], [aria-label*='Text message' i], [aria-label*='Start chat' i]"
+      );
+    }, null, { timeout }).catch(() => {});
   }
 
   async listConversations(limit = 20) {
