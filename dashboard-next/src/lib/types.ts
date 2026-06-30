@@ -29,6 +29,7 @@ export interface Overview {
 
 export interface QueueCounts {
   waiting: number;
+  paused: number;
   active: number;
   completed: number;
   failed: number;

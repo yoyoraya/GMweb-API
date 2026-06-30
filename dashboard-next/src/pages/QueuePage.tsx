@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowUp, X, RefreshCw } from "lucide-react";
+import { ArrowUp, X, RefreshCw, Pause, Play } from "lucide-react";
 import { api } from "@/lib/api";
 import type { QueueCounts, QueueJob } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,16 +11,18 @@ import { cn } from "@/lib/utils";
 export function QueuePage() {
   const [jobs, setJobs] = useState<QueueJob[]>([]);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
+  const [paused, setPaused] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const [c, j] = await Promise.all([
-        api<{ counts: QueueCounts }>("/admin/queue", { headers: { "Content-Type": "text/plain" } }),
+        api<{ counts: QueueCounts; paused: boolean }>("/admin/queue", { headers: { "Content-Type": "text/plain" } }),
         api<{ jobs: QueueJob[] }>("/admin/queue/jobs?limit=100", { headers: { "Content-Type": "text/plain" } }),
       ]);
       setCounts(c.counts);
+      setPaused(c.paused);
       setJobs(j.jobs);
     } catch {
       /* transient */
@@ -37,7 +39,7 @@ export function QueuePage() {
 
   // live nudge on send events
   useSSE((e) => {
-    if (e.type.startsWith("send_")) load();
+    if (e.type.startsWith("send_") || e.type.startsWith("queue_")) load();
   }, true);
 
   async function promote(id: string) {
@@ -47,6 +49,10 @@ export function QueuePage() {
   async function cancel(id: string) {
     if (!confirm("Cancel this queued message?")) return;
     await api(`/admin/queue/jobs/${id}`, { method: "DELETE" }).catch(() => {});
+    load();
+  }
+  async function togglePaused() {
+    await api(`/admin/queue/${paused ? "resume" : "pause"}`, { method: "POST" }).catch(() => {});
     load();
   }
 
@@ -60,6 +66,11 @@ export function QueuePage() {
               {counts.waiting} waiting · {counts.active} active · {counts.failed} failed
             </span>
           )}
+          <Badge variant={paused ? "warning" : "secondary"}>{paused ? "PAUSED" : "RUNNING"}</Badge>
+          <Button variant="secondary" size="sm" onClick={togglePaused}>
+            {paused ? <Play className="size-4" /> : <Pause className="size-4" />}
+            {paused ? "Resume paced" : "Pause"}
+          </Button>
           <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
             <RefreshCw className={cn("size-4", loading && "animate-spin")} />
           </Button>

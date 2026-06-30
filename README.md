@@ -184,7 +184,13 @@ the page spins, sends hang, the queue backs up. GMweb fights this on three level
 3. 🤖 **System watchdog** (`gmweb-monitor.timer`) — checks `/health` + `/ready` every
    2 min and restarts Chrome + API if the session stays unpaired.
 
-Tunables (env): `SEND_DEDUPE_SECONDS`, `SEND_TIMEOUT_MS`, `SEND_FAIL_RESTART_THRESHOLD`, `POLL_INTERVAL_MS`.
+Sends are paced by default (minimum 15 seconds apart, maximum 4 starts per minute).
+If Google displays "Please wait before creating more conversations", the queue
+auto-pauses instead of retrying into the restriction. Resume it only after the
+session has rested, using `POST /admin/queue/resume`. You can also pause it with
+`POST /admin/queue/pause`. Tunables (env): `SEND_MIN_INTERVAL_MS`,
+`SEND_MAX_PER_MINUTE`, `SEND_DEDUPE_SECONDS`, `SEND_TIMEOUT_MS`,
+`SEND_FAIL_RESTART_THRESHOLD`, `POLL_INTERVAL_MS`.
 
 ---
 

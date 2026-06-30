@@ -39,6 +39,10 @@ class GoogleMessagesClient extends EventEmitter {
     // rotations complete can end Google's retry loop; we only kill STALLED tabs.
     this.rotationGraceMs = Number(config.rotationGraceMs) || 8000;
     this.rotationSeen = new WeakMap(); // page -> first-seen timestamp
+    // Applies to every Start-chat attempt, including retries within one job.
+    // Worker pacing alone cannot protect against those internal retries.
+    this.conversationOpenIntervalMs = Math.max(1000, Number(config.sendMinIntervalMs) || 15000);
+    this.lastConversationOpenAt = 0;
   }
 
   async start() {
@@ -241,12 +245,30 @@ class GoogleMessagesClient extends EventEmitter {
     if (await this.openExistingConversation(to)) return true;
 
     // 3. New number — Start-chat UI flow.
+    const conversationWaitMs = Math.max(0, this.lastConversationOpenAt + this.conversationOpenIntervalMs - Date.now());
+    if (conversationWaitMs > 0) {
+      onStage?.("conversation_pacing");
+      await page.waitForTimeout(conversationWaitMs);
+    }
+    this.lastConversationOpenAt = Date.now();
     onStage?.("start_chat");
-    if (await this.startChatFlow(to)) return true;
+    if (await this.startChatFlow(to, onStage)) return true;
+    if (await this.conversationCreationRateLimited()) {
+      const error = new Error("Google Messages asked us to wait before creating more conversations.");
+      error.code = "GOOGLE_CONVERSATION_RATE_LIMIT";
+      error.statusCode = 429;
+      throw error;
+    }
 
     // 4. Last resort — open the conversation by URL.
     onStage?.("open_by_url");
     if (await this.openConversationByUrl(to)) return true;
+    if (await this.conversationCreationRateLimited()) {
+      const error = new Error("Google Messages asked us to wait before creating more conversations.");
+      error.code = "GOOGLE_CONVERSATION_RATE_LIMIT";
+      error.statusCode = 429;
+      throw error;
+    }
 
     return false;
   }
@@ -269,7 +291,18 @@ class GoogleMessagesClient extends EventEmitter {
     let sent = false;
     for (let attempt = 1; attempt <= 3 && !sent; attempt++) {
       stage(attempt === 1 ? "opening" : `reload_retry_${attempt}`);
-      const opened = await this.openForSend(to, stage).catch(() => false);
+      let opened = false;
+      try {
+        opened = await this.openForSend(to, stage);
+      } catch (error) {
+        // This is an explicit Google anti-abuse response, not a wedged page.
+        // Retrying immediately would create more conversations and extend the
+        // restriction, so surface it to the queue on the first occurrence.
+        if (error?.code === "GOOGLE_CONVERSATION_RATE_LIMIT") {
+          stage("google_rate_limited");
+          throw error;
+        }
+      }
 
       if (opened) {
         // Dup-guard (retries only): a previous attempt may already have delivered
@@ -305,6 +338,16 @@ class GoogleMessagesClient extends EventEmitter {
     };
     this.emit("message:sent", event);
     return event;
+  }
+
+  async conversationCreationRateLimited() {
+    const page = await this.ensurePage();
+    try {
+      const bodyText = await page.locator("body").innerText({ timeout: 1500 });
+      return /please\s+wait\s+before\s+creating\s+more\s+conversations/i.test(bodyText);
+    } catch {
+      return false;
+    }
   }
 
   // Resolves true once the message composer is present (a conversation is open
@@ -361,19 +404,23 @@ class GoogleMessagesClient extends EventEmitter {
 
   // Open a conversation purely through the "Start chat" UI — no page reload.
   // Works for ANY number regardless of whether it is visible in the sidebar.
-  async startChatFlow(to) {
+  async startChatFlow(to, onStage) {
     const page = await this.ensurePage();
     try {
-      // The Start-chat FAB is reachable from anywhere in the app (sidebar).
-      await this.clickFirst([
-        "[aria-label*='Start chat' i]",
-        "[aria-label*='Start conversation' i]",
-        "mws-fab",
-        "text=/Start chat/i",
-        "text=/New conversation/i"
-      ], "start chat");
+      // Reuse an already-open New conversation screen. Clicking Start chat
+      // again can reset the recipient field while Google is still rendering it.
+      if (!/\/conversations\/new(?:[/?#]|$)/i.test(page.url())) {
+        await this.clickFirst([
+          "[aria-label*='Start chat' i]",
+          "[aria-label*='Start conversation' i]",
+          "mws-fab",
+          "text=/Start chat/i",
+          "text=/New conversation/i"
+        ], "start chat");
+      }
 
       const recipientInput = await this.locatorFirst([
+        "input[placeholder*='Type a name' i]",
         "input[placeholder*='name' i]",
         "input[placeholder*='phone' i]",
         "input[aria-label*='recipient' i]",
@@ -381,16 +428,29 @@ class GoogleMessagesClient extends EventEmitter {
         "input[type='tel']",
         "input[type='text']"
       ]);
+      onStage?.("recipient_input_ready");
       await recipientInput.fill(to);
-      await page.waitForTimeout(500); // let the "Send to <number>" / contact rows render
+      // Verify the controlled input accepted the value. If Google's component
+      // dropped fill() during a re-render, retry once with real keystrokes.
+      if ((await recipientInput.inputValue().catch(() => "")) !== String(to)) {
+        await recipientInput.click();
+        await recipientInput.press("Control+A").catch(() => {});
+        await recipientInput.type(String(to), { delay: 35 });
+      }
+      const entered = await recipientInput.inputValue().catch(() => "");
+      if (!entered) throw new Error("recipient input did not accept the phone number");
+      onStage?.("recipient_filled");
+      await page.waitForTimeout(750); // let the "Send to <number>" / contact rows render
 
       // Commit the recipient by CLICKING the suggestion row (the reliable, human
       // way) — it returns true only once the composer actually opened. Enter is a
       // last-resort fallback for layouts where no row is clickable.
+      onStage?.("selecting_recipient");
       if (await this.clickRecipientOption(to)) return true;
       await recipientInput.press("Enter").catch(() => {});
       return await this.composerReady(5000);
     } catch {
+      onStage?.("recipient_input_failed");
       return false;
     }
   }

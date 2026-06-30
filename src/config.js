@@ -49,6 +49,7 @@ module.exports = {
   browserMode: process.env.BROWSER_MODE || "launch",
   browserCdpUrl: process.env.BROWSER_CDP_URL || "http://127.0.0.1:9222",
   pollIntervalMs: intFromEnv(process.env.POLL_INTERVAL_MS, 5000),
+  sendMinIntervalMs: intFromEnv(process.env.SEND_MIN_INTERVAL_MS, 15000),
   conversationCacheFile: path.resolve(rootDir, process.env.CONVERSATION_CACHE_FILE || "./data/conversation-cache.json"),
   webhookUrl: process.env.WEBHOOK_URL || "",
   enableDebugRoutes: boolFromEnv(process.env.ENABLE_DEBUG_ROUTES, false),

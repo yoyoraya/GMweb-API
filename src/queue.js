@@ -111,13 +111,32 @@ class SendQueue {
     };
   }
 
-  counts() {
-    return this.queue.getJobCounts("waiting", "active", "completed", "failed", "delayed");
+  async counts() {
+    const counts = await this.queue.getJobCounts("waiting", "paused", "active", "completed", "failed", "delayed");
+    // BullMQ moves waiting jobs into its `paused` bucket while a queue is
+    // paused. They are still pending sends, so expose waiting as the total
+    // pending count; retain paused separately for diagnostics.
+    return {
+      ...counts,
+      waiting: (counts.waiting || 0) + (counts.paused || 0)
+    };
+  }
+
+  pause() {
+    return this.queue.pause();
+  }
+
+  resume() {
+    return this.queue.resume();
+  }
+
+  isPaused() {
+    return this.queue.isPaused();
   }
 
   // List jobs (newest first) for the dashboard queue panel. Returns a light
   // shape — no full message body, just a preview.
-  async listJobs({ states = ["active", "waiting", "delayed"], limit = 100 } = {}) {
+  async listJobs({ states = ["active", "waiting", "paused", "delayed"], limit = 100 } = {}) {
     const jobs = await this.queue.getJobs(states, 0, Math.max(0, limit - 1), false);
     const out = [];
     for (const job of jobs) {
@@ -169,9 +188,10 @@ class SendQueue {
   // Worker runs IN-PROCESS with concurrency 1 so it shares the single
   // Playwright browser instance. A separate worker process would need its
   // own browser and break the Google Messages session.
-  startWorker(processor, handlers = {}) {
+  startWorker(processor, handlers = {}, options = {}) {
     this.worker = new Worker(QUEUE_NAME, processor, {
       connection,
+      ...options,
       concurrency: 1
     });
     if (handlers.onActive) this.worker.on("active", handlers.onActive);

@@ -212,6 +212,8 @@ VNC_PROXY_TARGET=http://127.0.0.1:$NOVNC_PORT
 SEND_DEDUPE_SECONDS=120
 SEND_TIMEOUT_MS=80000
 SEND_FAIL_RESTART_THRESHOLD=3
+SEND_MIN_INTERVAL_MS=15000
+SEND_MAX_PER_MINUTE=4
 ENV
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"; chmod 600 "$APP_DIR/.env"
   printf '%s' "$pass" >"$STATE_DIR/dashboard-password.txt"; chmod 600 "$STATE_DIR/dashboard-password.txt"

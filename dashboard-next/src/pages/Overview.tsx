@@ -20,6 +20,7 @@ function StatePill({ ok, label }: { ok: boolean; label: string }) {
 export function OverviewPage() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
+  const [queuePaused, setQueuePaused] = useState(false);
   const [loading, setLoading] = useState(false);
 
   async function load() {
@@ -27,10 +28,11 @@ export function OverviewPage() {
     try {
       const [o, c] = await Promise.all([
         api<Overview>("/admin/overview", { headers: { "Content-Type": "text/plain" } }),
-        api<{ counts: QueueCounts }>("/admin/queue", { headers: { "Content-Type": "text/plain" } }),
+        api<{ counts: QueueCounts; paused: boolean }>("/admin/queue", { headers: { "Content-Type": "text/plain" } }),
       ]);
       setOv(o);
       setCounts(c.counts);
+      setQueuePaused(c.paused);
     } catch {
       /* shown via state */
     } finally {
@@ -85,7 +87,9 @@ export function OverviewPage() {
       <div>
         <div className="mb-2 flex items-center gap-2">
           <h2 className="text-sm font-semibold">Send queue</h2>
-          {counts && counts.waiting + counts.active === 0 && <Badge variant="success">idle</Badge>}
+          {queuePaused
+            ? <Badge variant="warning">paused</Badge>
+            : counts && counts.waiting + counts.active === 0 && <Badge variant="success">idle</Badge>}
         </div>
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           {queueCards.map((c) => (

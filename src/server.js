@@ -423,27 +423,56 @@ const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS) || 80000;
 // even across restarts (backed by the SQLite ledger). Default 24h.
 const SEND_DEDUPE_MS = (Number(process.env.SEND_DEDUPE_HOURS) || 24) * 3600 * 1000;
 const SEND_FAIL_RESTART_THRESHOLD = Number(process.env.SEND_FAIL_RESTART_THRESHOLD) || 3;
+// Deliberately conservative pacing for browser-driven sends. The minimum gap
+// prevents bursts; BullMQ's limiter also caps starts across a full minute.
+const SEND_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.SEND_MIN_INTERVAL_MS) || 15000);
+const SEND_MAX_PER_MINUTE = Math.max(1, Number(process.env.SEND_MAX_PER_MINUTE) || 4);
 let sendFailStreak = 0;
 let recovering = false;
+let lastSendStartedAt = 0;
+
+async function waitForSendPace(job) {
+  const waitMs = Math.max(0, lastSendStartedAt + SEND_MIN_INTERVAL_MS - Date.now());
+  if (waitMs > 0) {
+    sendStore.markStage(job.id, "pacing");
+    emitSse({ type: "send_stage", jobId: job.id, to: job.data?.to, stage: "pacing", waitMs, at: new Date().toISOString() });
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+  lastSendStartedAt = Date.now();
+}
 
 function startSendWorker() {
   sendQueue.startWorker(
     async (job) => {
       // Runs in-process; shares the single Playwright browser via withBrowserLock.
-      const result = await Promise.race([
-        client.sendMessage({
-          to: job.data.to,
-          text: job.data.text,
-          // Per-message progress: record the stage in the ledger and stream it.
-          onStage: (s) => {
-            sendStore.markStage(job.id, s);
-            emitSse({ type: "send_stage", jobId: job.id, to: job.data?.to, stage: s, at: new Date().toISOString() });
-          }
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("send_timeout")), SEND_TIMEOUT_MS))
-      ]);
-      sendFailStreak = 0; // a success clears the streak
-      return result;
+      await waitForSendPace(job);
+      try {
+        const result = await Promise.race([
+          client.sendMessage({
+            to: job.data.to,
+            text: job.data.text,
+            // Per-message progress: record the stage in the ledger and stream it.
+            onStage: (s) => {
+              sendStore.markStage(job.id, s);
+              emitSse({ type: "send_stage", jobId: job.id, to: job.data?.to, stage: s, at: new Date().toISOString() });
+            }
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("send_timeout")), SEND_TIMEOUT_MS))
+        ]);
+        sendFailStreak = 0; // a success clears the streak
+        return result;
+      } catch (error) {
+        if (error?.code === "GOOGLE_CONVERSATION_RATE_LIMIT") {
+          await sendQueue.pause();
+          app.log.warn("send queue auto-paused after Google limited new conversations");
+          emitSse({
+            type: "queue_paused",
+            reason: "google_conversation_rate_limit",
+            at: new Date().toISOString()
+          });
+        }
+        throw error;
+      }
     },
     {
       onActive: (job) => {
@@ -506,6 +535,9 @@ function startSendWorker() {
         }
       },
       onError: (err) => app.log.warn({ err }, "send worker error")
+    },
+    {
+      limiter: { max: SEND_MAX_PER_MINUTE, duration: 60000 }
     }
   );
 }
@@ -1558,10 +1590,12 @@ app.get("/admin/queue", {
       200: {
         type: "object",
         properties: {
+          paused: { type: "boolean" },
           counts: {
             type: "object",
             properties: {
               waiting: { type: "integer" },
+              paused: { type: "integer" },
               active: { type: "integer" },
               completed: { type: "integer" },
               failed: { type: "integer" },
@@ -1572,7 +1606,43 @@ app.get("/admin/queue", {
       }
     }
   }
-}, async () => ({ counts: await sendQueue.counts() }));
+}, async () => ({ paused: await sendQueue.isPaused(), counts: await sendQueue.counts() }));
+
+app.post("/admin/queue/pause", {
+  schema: {
+    summary: "Pause the send queue",
+    description: "Stops new send jobs from starting; the current active job, if any, is allowed to finish. **Master token only.**",
+    tags: ["Admin"],
+    response: {
+      200: {
+        type: "object",
+        properties: { ok: { type: "boolean" }, paused: { type: "boolean" } }
+      }
+    }
+  }
+}, async () => {
+  await sendQueue.pause();
+  emitSse({ type: "queue_paused", reason: "manual", at: new Date().toISOString() });
+  return { ok: true, paused: true };
+});
+
+app.post("/admin/queue/resume", {
+  schema: {
+    summary: "Resume the paced send queue",
+    description: "Allows queued jobs to start again under the configured send pacing limits. **Master token only.**",
+    tags: ["Admin"],
+    response: {
+      200: {
+        type: "object",
+        properties: { ok: { type: "boolean" }, paused: { type: "boolean" } }
+      }
+    }
+  }
+}, async () => {
+  await sendQueue.resume();
+  emitSse({ type: "queue_resumed", at: new Date().toISOString() });
+  return { ok: true, paused: false };
+});
 
 app.get("/admin/sends", {
   schema: {
