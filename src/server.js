@@ -12,6 +12,7 @@ const config = require("./config");
 const { GoogleMessagesClient } = require("./googleMessagesClient");
 const { ApiKeyStore } = require("./apiKeys");
 const { SendQueue } = require("./queue");
+const { SendStore } = require("./sendStore");
 const pkg = require("../package.json");
 
 const app = Fastify({
@@ -26,6 +27,9 @@ const apiKeyStore = new ApiKeyStore(
   path.join(config.rootDir, "data", "api-requests.jsonl")
 );
 const sendQueue = new SendQueue();
+// Durable send ledger — survives crashes, tracks per-message status, powers the
+// 24h de-dupe, and lets us rebuild the queue from disk if Redis is ever wiped.
+const sendStore = new SendStore(path.join(config.rootDir, "data", "sends.db"));
 const dashboardSessionCookieName = "gmweb_session";
 const dashboardPasswordCookieName = "gmweb_login";
 const dashboardDir = path.join(config.rootDir, "public", "dashboard");
@@ -414,10 +418,10 @@ client.on("error", (error) => app.log.warn({ error }, "client error"));
 // Hard per-send timeout so a wedged page can never stall the queue, plus
 // auto-recovery (reconnect + fresh page) after consecutive failures.
 const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS) || 80000;
-// Suppress an identical {to,text} re-sent within this window (seconds) even when
-// the caller sends no Idempotency-Key. 0 disables. Guards against a consumer
-// accidentally POSTing the same SMS multiple times.
-const SEND_DEDUPE_SECONDS = Number(process.env.SEND_DEDUPE_SECONDS) || 120;
+// Durable de-dupe window: an identical {to,text} already SENT within this many
+// hours (or still in flight) is suppressed — even with no Idempotency-Key, and
+// even across restarts (backed by the SQLite ledger). Default 24h.
+const SEND_DEDUPE_MS = (Number(process.env.SEND_DEDUPE_HOURS) || 24) * 3600 * 1000;
 const SEND_FAIL_RESTART_THRESHOLD = Number(process.env.SEND_FAIL_RESTART_THRESHOLD) || 3;
 let sendFailStreak = 0;
 let recovering = false;
@@ -434,13 +438,17 @@ function startSendWorker() {
       return result;
     },
     {
-      onActive: (job) => emitSse({
-        type: "send_processing",
-        jobId: job.id,
-        to: job.data?.to,
-        at: new Date().toISOString()
-      }),
+      onActive: (job) => {
+        sendStore.markStatus(job.id, "active", { attempts: job.attemptsMade || 0 });
+        emitSse({
+          type: "send_processing",
+          jobId: job.id,
+          to: job.data?.to,
+          at: new Date().toISOString()
+        });
+      },
       onCompleted: (job, result) => {
+        sendStore.markStatus(job.id, "sent", { attempts: job.attemptsMade || 0 });
         const event = {
           type: "send_completed",
           jobId: job.id,
@@ -455,13 +463,20 @@ function startSendWorker() {
       onFailed: (job, err) => {
         const attemptsMade = job?.attemptsMade || 0;
         const maxAttempts = job?.opts?.attempts || 1;
+        const willRetry = attemptsMade < maxAttempts;
+        // While BullMQ still has retries left the job goes back to waiting, so
+        // keep the ledger row 'queued'; only mark 'failed' once it's terminal.
+        sendStore.markStatus(job?.id, willRetry ? "queued" : "failed", {
+          attempts: attemptsMade,
+          error: err?.message || "send failed"
+        });
         const event = {
           type: "send_failed",
           jobId: job?.id,
           to: job?.data?.to,
           error: err?.message || "send failed",
           attemptsMade,
-          willRetry: attemptsMade < maxAttempts,
+          willRetry,
           at: new Date().toISOString()
         };
         emitSse(event);
@@ -470,7 +485,6 @@ function startSendWorker() {
         // Auto-recover the browser after repeated failures (likely a wedged
         // page). Reconnects and loads a fresh Messages page without killing
         // the external Chrome. Only counts terminal failures (no more retries).
-        const willRetry = attemptsMade < maxAttempts;
         if (!willRetry) sendFailStreak += 1;
         if (sendFailStreak >= SEND_FAIL_RESTART_THRESHOLD && !recovering) {
           recovering = true;
@@ -1438,28 +1452,26 @@ app.post("/send", {
     }
   }
 
-  // Automatic content de-dupe (only when no explicit Idempotency-Key was given,
-  // since that path already dedupes). Blocks the exact same {to,text} re-sent
-  // within SEND_DEDUPE_SECONDS — returns the original job instead of sending again.
-  const contentHash = crypto.createHash("sha256").update(`${to}\n${text}`).digest("hex").slice(0, 24);
-  if (!idemKey && SEND_DEDUPE_SECONDS > 0) {
-    const reserved = await sendQueue.reserveDedupe(contentHash, SEND_DEDUPE_SECONDS).catch(() => "OK");
-    if (reserved !== "OK") {
-      let existing = await sendQueue.getDedupe(contentHash).catch(() => null);
-      for (let i = 0; i < 20 && existing === "pending"; i++) {
-        await new Promise((r) => setTimeout(r, 100));
-        existing = await sendQueue.getDedupe(contentHash).catch(() => null);
-      }
-      app.log.warn({ to }, "duplicate send suppressed (same to/text within dedupe window)");
+  // Durable 24h de-dupe + status ledger (skipped when an explicit Idempotency-Key
+  // is used — that path dedupes its own way). Atomically claims the {to,text}:
+  // if an identical message was already sent within the window, or is still in
+  // flight, suppress it instead of sending again.
+  let ledgerId = null;
+  if (!idemKey) {
+    const claim = sendStore.claim({ to, text, keyName: projectKey?.name || "master", windowMs: SEND_DEDUPE_MS });
+    if (claim.action !== "new") {
+      app.log.warn({ to, reason: claim.action }, "duplicate send suppressed by ledger");
       reply.code(200);
       return {
         ok: true,
-        jobId: existing && existing !== "pending" ? existing : null,
+        jobId: claim.row.job_id || null,
         status: "duplicate_suppressed",
+        reason: claim.action,           // duplicate_suppressed | duplicate_inflight
         deduped: true,
         priority: highPriority ? "high" : "normal"
       };
     }
+    ledgerId = claim.id;
   }
 
   let job;
@@ -1470,11 +1482,11 @@ app.post("/send", {
     );
   } catch (error) {
     if (idemKey) await sendQueue.releaseIdempotency(idemKey);
-    if (!idemKey && SEND_DEDUPE_SECONDS > 0) await sendQueue.releaseDedupe(contentHash);
+    if (ledgerId) sendStore.markById(ledgerId, "failed", error.message);
     throw error;
   }
   if (idemKey) await sendQueue.setIdempotencyJob(idemKey, job.id, bodyHash).catch(() => {});
-  if (!idemKey && SEND_DEDUPE_SECONDS > 0) await sendQueue.setDedupeJob(contentHash, job.id, SEND_DEDUPE_SECONDS).catch(() => {});
+  if (ledgerId) sendStore.attachJob(ledgerId, job.id);
   emitSse({ type: "send_queued", jobId: job.id, to, priority: highPriority ? "high" : "normal", at: new Date().toISOString() });
 
   if (wait) {
@@ -1552,6 +1564,65 @@ app.get("/admin/queue", {
     }
   }
 }, async () => ({ counts: await sendQueue.counts() }));
+
+app.get("/admin/sends", {
+  schema: {
+    summary: "Send ledger (durable)",
+    description: "Returns the persistent send ledger: status counts and the most recent messages with their delivery state. Survives restarts and powers the 24h de-dupe. **Master token only.**",
+    tags: ["Admin"],
+    querystring: {
+      type: "object",
+      properties: { limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 } }
+    },
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          stats: {
+            type: "object",
+            properties: {
+              queued: { type: "integer" }, active: { type: "integer" }, sent: { type: "integer" },
+              failed: { type: "integer" }, suppressed: { type: "integer" }
+            }
+          },
+          sends: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "integer" },
+                to: { type: "string" },
+                textPreview: { type: "string" },
+                keyName: { type: ["string", "null"] },
+                jobId: { type: ["string", "null"] },
+                status: { type: "string" },
+                attempts: { type: "integer" },
+                error: { type: ["string", "null"] },
+                createdAt: { type: ["string", "null"] },
+                sentAt: { type: ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}, async (request) => {
+  const limit = parseLimit(request.query.limit, 100, 1000);
+  const sends = sendStore.recent(limit).map((r) => ({
+    id: r.id,
+    to: r.to_number,
+    textPreview: String(r.text || "").replace(/\s+/g, " ").slice(0, 80),
+    keyName: r.key_name,
+    jobId: r.job_id,
+    status: r.status,
+    attempts: r.attempts,
+    error: r.error,
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : null,
+    sentAt: r.sent_at ? new Date(r.sent_at).toISOString() : null
+  }));
+  return { stats: sendStore.stats(), sends };
+});
 
 app.get("/admin/queue/jobs", {
   schema: {
@@ -1833,6 +1904,36 @@ app.get("/events", {
 
 }); // end app.after — routes are now registered after swagger's onRoute hook
 
+// Crash recovery: rebuild the queue from the ledger. Any unfinished row whose
+// BullMQ job is missing (e.g. Redis was wiped) is re-enqueued, so a crash can
+// never lose the queue. Rows still alive in Redis are left untouched (so a plain
+// API restart never double-sends).
+async function reconcilePending() {
+  let pending;
+  try { pending = sendStore.pending(); } catch { return; }
+  if (!pending.length) return;
+  let restored = 0;
+  for (const row of pending) {
+    let alive = false;
+    if (row.job_id) {
+      const st = await sendQueue.jobStatus(row.job_id).catch(() => null);
+      alive = st && ["waiting", "active", "delayed"].includes(st.state);
+    }
+    if (alive) continue;
+    try {
+      const job = await sendQueue.enqueue(
+        { to: row.to_number, text: row.text, keyId: null, keyName: row.key_name || "reconcile" },
+        {}
+      );
+      sendStore.attachJob(row.id, job.id);
+      restored += 1;
+    } catch (error) {
+      app.log.warn({ error: error.message, id: row.id }, "reconcile enqueue failed");
+    }
+  }
+  if (restored) app.log.info(`reconciled ${restored} unfinished send(s) from the ledger into the queue`);
+}
+
 async function main() {
   if (config.appEnv === "production" && !config.apiToken) {
     throw new Error("API_TOKEN is required when NODE_ENV=production.");
@@ -1840,6 +1941,7 @@ async function main() {
   await loadSessions();
   await apiKeyStore.load();
   startSendWorker();
+  await reconcilePending().catch((error) => app.log.warn({ error: error.message }, "reconcile failed"));
   await app.listen({ host: config.host, port: config.port });
   client.start().catch((error) => app.log.warn({ error }, "auto browser start failed"));
 }
@@ -1847,6 +1949,7 @@ async function main() {
 async function shutdown(signal) {
   app.log.info({ signal }, "shutting down");
   await sendQueue.close().catch((error) => app.log.warn({ error }, "queue close failed"));
+  try { sendStore.close(); } catch (error) { app.log.warn({ error }, "ledger close failed"); }
   await client.stop().catch((error) => app.log.warn({ error }, "browser stop failed"));
   await app.close().catch((error) => app.log.warn({ error }, "server close failed"));
   process.exit(0);

@@ -1,6 +1,6 @@
 {
   "name": "gmweb-api",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "description": "GMweb API: OpenWA-style HTTP bridge for Google Messages for Web.",
   "main": "src/server.js",
@@ -21,6 +21,7 @@
     "@fastify/http-proxy": "^11.5.0",
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^6.0.0",
+    "better-sqlite3": "^12.11.1",
     "bullmq": "^5.79.1",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
