@@ -48,12 +48,20 @@ class GoogleMessagesClient extends EventEmitter {
     this.lastConversationOpenAt = 0;
     // A warm index of the sidebar lets sends open existing threads with one
     // SPA click instead of repeatedly invoking Google's new-conversation flow.
-    this.sidebarConversationIndex = new Map();
-    this.sidebarIndexReady = false;
+    this.sidebarConversationIndex = this.readSidebarIndexCache();
+    this.sidebarIndexReady = this.sidebarConversationIndex.size > 0;
     this.sidebarIndexWarmPromise = null;
+    this.sidebarIndexWriteTimer = null;
     this.statusRefreshPromise = null;
-    this.sidebarIndexStats = { rows: 0, batches: 0, reachedPreviousYear: false };
+    this.sidebarIndexStats = {
+      rows: this.sidebarConversationIndex.size,
+      batches: 0,
+      reachedPreviousYear: false,
+      loadedFromDisk: this.sidebarConversationIndex.size > 0
+    };
     this.conversationHistoryMaxBatches = Math.max(1, Number(config.conversationHistoryMaxBatches) || 80);
+    this.conversationIndexMaxBatches = Math.max(1, Number(config.conversationIndexMaxBatches) || 6);
+    this.conversationIndexBudgetMs = Math.max(10000, Number(config.conversationIndexBudgetMs) || 45000);
   }
 
   async start() {
@@ -440,11 +448,22 @@ class GoogleMessagesClient extends EventEmitter {
     }
 
     const clicked = await this.clickConversationInSidebar(page, match.href);
-    if (!clicked) return false;
-    if (await this.composerReady(6000)) {
+    if (clicked && await this.composerReady(6000)) {
       this.cacheRecipientConversation(to, match.href);
       return true;
     }
+
+    // A persisted index can know about an old conversation that is not in the
+    // currently rendered/virtualized sidebar. Navigate straight to its stable
+    // Google Messages URL instead of inflating the sidebar DOM or falling into
+    // the much slower Start-chat flow.
+    try {
+      await page.goto(new URL(match.href, MESSAGES_URL).toString(), { waitUntil: "domcontentloaded" });
+      if (await this.composerReady(10000)) {
+        this.cacheRecipientConversation(to, match.href);
+        return true;
+      }
+    } catch { /* fall through to Start chat */ }
     return false;
   }
 
@@ -619,9 +638,46 @@ class GoogleMessagesClient extends EventEmitter {
   }
 
   mergeSidebarConversationIndex(rows) {
+    let changed = false;
     for (const row of rows || []) {
-      if (row?.href) this.sidebarConversationIndex.set(row.href, row);
+      if (row?.href) {
+        const previous = this.sidebarConversationIndex.get(row.href);
+        this.sidebarConversationIndex.set(row.href, row);
+        if (!previous || previous.text !== row.text || previous.timestamp !== row.timestamp) changed = true;
+      }
     }
+    if (changed) this.scheduleSidebarIndexWrite();
+  }
+
+  readSidebarIndexCache() {
+    const file = this.config.conversationIndexFile;
+    if (!file) return new Map();
+    try {
+      const rows = JSON.parse(fs.readFileSync(file, "utf8"));
+      return new Map((Array.isArray(rows) ? rows : []).filter((row) => row?.href).map((row) => [row.href, row]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  scheduleSidebarIndexWrite() {
+    if (!this.config.conversationIndexFile || this.sidebarIndexWriteTimer) return;
+    this.sidebarIndexWriteTimer = setTimeout(() => {
+      this.sidebarIndexWriteTimer = null;
+      this.writeSidebarIndexCache();
+    }, 1000);
+    this.sidebarIndexWriteTimer.unref?.();
+  }
+
+  writeSidebarIndexCache() {
+    const file = this.config.conversationIndexFile;
+    if (!file) return;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const temp = `${file}.tmp`;
+      fs.writeFileSync(temp, JSON.stringify([...this.sidebarConversationIndex.values()]));
+      fs.renameSync(temp, file);
+    } catch { /* cache persistence is best effort */ }
   }
 
   timestampIsBeforeCurrentYear(timestamp) {
@@ -664,7 +720,9 @@ class GoogleMessagesClient extends EventEmitter {
     let batches = 0;
     let stalls = 0;
     let reachedPreviousYear = false;
-    for (; batches < this.conversationHistoryMaxBatches; batches++) {
+    const startedAt = Date.now();
+    const maxBatches = Math.min(this.conversationHistoryMaxBatches, this.conversationIndexMaxBatches);
+    for (; batches < maxBatches && Date.now() - startedAt < this.conversationIndexBudgetMs; batches++) {
       const rows = await this.listConversationsUnlocked(1000, { loadMore: false });
       this.mergeSidebarConversationIndex(rows);
       reachedPreviousYear = rows.some((row) => this.timestampIsBeforeCurrentYear(row.timestamp));
@@ -698,8 +756,15 @@ class GoogleMessagesClient extends EventEmitter {
     this.sidebarIndexStats = {
       rows: this.sidebarConversationIndex.size,
       batches,
-      reachedPreviousYear
+      reachedPreviousYear,
+      loadedFromDisk: false,
+      elapsedMs: Date.now() - startedAt
     };
+    this.writeSidebarIndexCache();
+    // Google often retains every lazy-loaded row in the DOM. A clean navigation
+    // keeps the in-memory/disk index but drops hundreds of expensive list nodes.
+    await page.goto(`${MESSAGES_URL}/conversations`, { waitUntil: "domcontentloaded" }).catch(() => {});
+    await this.waitForAppReady(12000).catch(() => {});
     onStage?.("sidebar_index_ready");
     return this.sidebarIndexStats;
   }
@@ -709,7 +774,7 @@ class GoogleMessagesClient extends EventEmitter {
   // Cheap when enough items are already present (the loop exits immediately).
   async loadConversationListItems(page, target) {
     let stalls = 0;
-    for (let i = 0; i < this.conversationHistoryMaxBatches; i++) {
+    for (let i = 0; i < Math.min(this.conversationHistoryMaxBatches, this.conversationIndexMaxBatches); i++) {
       const before = await page.locator("mws-conversation-list-item").count();
       if (before >= target) break;
       await page.evaluate(() => {
@@ -1343,21 +1408,41 @@ class GoogleMessagesClient extends EventEmitter {
 
   async withBrowserLock(action, { timeoutMs = this.lockTimeoutMs } = {}) {
     const previous = this.actionLock;
+    const requestedAt = Date.now();
     let release;
     this.actionLock = new Promise((resolve) => {
       release = resolve;
     });
 
-    await previous.catch(() => {});
     try {
-      if (!timeoutMs) return await action();
+      if (!timeoutMs) {
+        await previous.catch(() => {});
+        return await action();
+      }
+      // The budget covers BOTH waiting for the previous owner and executing
+      // this action. Previously the wait was unbounded, so a job could remain
+      // "active" without emitting a single stage while an orphaned browser
+      // operation held the lock ahead of it.
+      let waitTimer;
+      try {
+        await Promise.race([
+          previous.catch(() => {}),
+          new Promise((_, reject) => {
+            waitTimer = setTimeout(() => reject(new Error("browser_lock_wait_timeout")), timeoutMs);
+          })
+        ]);
+      } finally {
+        clearTimeout(waitTimer);
+      }
+
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - requestedAt));
       // Watchdog: never hold the lock longer than timeoutMs. If the action
       // wedges, reject so the lock frees and the queue keeps moving. The
       // orphaned action is abandoned; the worker triggers recover() on repeated
       // failures to rebuild a clean page.
       let timer;
       const guard = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("browser_lock_timeout")), timeoutMs);
+        timer = setTimeout(() => reject(new Error("browser_lock_timeout")), remainingMs);
       });
       try {
         return await Promise.race([action(), guard]);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ArrowUp, X, RefreshCw, Pause, Play } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import type { QueueCounts, QueueJob } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,11 +8,28 @@ import { Badge } from "@/components/ui/badge";
 import { useSSE } from "@/hooks/useSSE";
 import { cn } from "@/lib/utils";
 
+function elapsed(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
 export function QueuePage() {
   const [jobs, setJobs] = useState<QueueJob[]>([]);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [paused, setPaused] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [actionError, setActionError] = useState("");
+  const [staleSince, setStaleSince] = useState<number | null>(null);
+
+  function messageFor(err: unknown) {
+    return err instanceof ApiError ? err.message : "network error";
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -24,36 +41,73 @@ export function QueuePage() {
       setCounts(c.counts);
       setPaused(c.paused);
       setJobs(j.jobs);
-    } catch {
-      /* transient */
+      setStaleSince(null);
+    } catch (err) {
+      // Background polling failure: don't yell at the user every 8s, but do
+      // surface it if it persists — an expired session otherwise looks
+      // exactly like "the queue is frozen" with no indication why.
+      setStaleSince((prev) => prev ?? Date.now());
+      throw err;
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    load();
-    const t = setInterval(load, 8000);
+    load().catch(() => {});
+    const t = setInterval(() => load().catch(() => {}), 8000);
     return () => clearInterval(t);
   }, [load]);
 
   // live nudge on send events
   useSSE((e) => {
-    if (e.type.startsWith("send_") || e.type.startsWith("queue_")) load();
+    if (e.type.startsWith("send_") || e.type.startsWith("queue_")) load().catch(() => {});
   }, true);
 
   async function promote(id: string) {
-    await api(`/admin/queue/jobs/${id}/promote`, { method: "POST" }).catch(() => {});
-    load();
+    if (busyAction) return;
+    setBusyAction(`promote:${id}`);
+    setActionError("");
+    try {
+      await api(`/admin/queue/jobs/${id}/promote`, { method: "POST" });
+      await load();
+    } catch (err) {
+      setActionError(`Couldn't promote: ${messageFor(err)}`);
+    } finally {
+      setBusyAction(null);
+    }
   }
   async function cancel(id: string) {
+    if (busyAction) return;
     if (!confirm("Cancel this queued message?")) return;
-    await api(`/admin/queue/jobs/${id}`, { method: "DELETE" }).catch(() => {});
-    load();
+    setBusyAction(`cancel:${id}`);
+    setActionError("");
+    try {
+      await api(`/admin/queue/jobs/${id}`, { method: "DELETE" });
+      await load();
+    } catch (err) {
+      setActionError(`Couldn't cancel: ${messageFor(err)}`);
+    } finally {
+      setBusyAction(null);
+    }
   }
   async function togglePaused() {
-    await api(`/admin/queue/${paused ? "resume" : "pause"}`, { method: "POST" }).catch(() => {});
-    load();
+    if (busyAction) return;
+    // Capture intent before the state can change under us — the alternative
+    // (reading `paused` again after the request) is what let a stuck/slow
+    // request cause a second click to resend the same action instead of the
+    // opposite one.
+    const target = paused ? "resume" : "pause";
+    setBusyAction("toggle");
+    setActionError("");
+    try {
+      await api(`/admin/queue/${target}`, { method: "POST" });
+      await load();
+    } catch (err) {
+      setActionError(`Couldn't ${target}: ${messageFor(err)}`);
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   return (
@@ -67,14 +121,20 @@ export function QueuePage() {
             </span>
           )}
           <Badge variant={paused ? "warning" : "secondary"}>{paused ? "PAUSED" : "RUNNING"}</Badge>
-          <Button variant="secondary" size="sm" onClick={togglePaused}>
+          <Button variant="secondary" size="sm" onClick={togglePaused} disabled={busyAction !== null}>
             {paused ? <Play className="size-4" /> : <Pause className="size-4" />}
-            {paused ? "Resume paced" : "Pause"}
+            {busyAction === "toggle" ? "Working…" : paused ? "Resume paced" : "Pause"}
           </Button>
-          <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
+          <Button variant="secondary" size="sm" onClick={() => load().catch(() => {})} disabled={loading}>
             <RefreshCw className={cn("size-4", loading && "animate-spin")} />
           </Button>
         </div>
+        {actionError && <div className="text-xs text-destructive">{actionError}</div>}
+        {!actionError && staleSince && (
+          <div className="text-xs text-destructive">
+            Not updating since {new Date(staleSince).toLocaleTimeString()} — session may have expired, try reloading the page.
+          </div>
+        )}
       </CardHeader>
       <CardContent className="p-0">
         {jobs.length === 0 ? (
@@ -82,10 +142,13 @@ export function QueuePage() {
         ) : (
           <div className="max-h-[60vh] divide-y divide-border overflow-y-auto">
             {jobs.map((job) => (
-              <div key={job.id} className="flex items-center gap-3 px-4 py-3">
-                <Badge variant={job.priority === "high" ? "warning" : job.state === "active" ? "default" : "secondary"}>
-                  {job.priority === "high" ? "HIGH" : job.state}
-                </Badge>
+              <div key={job.id} className="flex items-start gap-3 px-4 py-3">
+                <div className="flex w-20 shrink-0 flex-col items-start gap-1">
+                  <Badge variant={job.state === "active" ? "default" : job.state === "delayed" ? "warning" : "secondary"}>
+                    {job.state}
+                  </Badge>
+                  {job.priority === "high" && <Badge variant="warning">HIGH</Badge>}
+                </div>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">{job.to ?? "—"}</div>
                   <div className="truncate text-xs text-muted-foreground" dir="auto">
@@ -93,8 +156,26 @@ export function QueuePage() {
                   </div>
                   <div className="text-[11px] text-muted-foreground">
                     {job.keyName ?? "—"}
-                    {job.attemptsMade ? ` · try ${job.attemptsMade}` : ""}
-                    {job.createdAt ? ` · ${new Date(job.createdAt).toLocaleTimeString()}` : ""}
+                    {` · attempt ${job.attemptsMade + (job.state === "active" ? 1 : 0)}/${job.maxAttempts}`}
+                    {job.createdAt ? ` · queued ${new Date(job.createdAt).toLocaleTimeString()}` : ""}
+                    {job.processedAt ? ` · started ${new Date(job.processedAt).toLocaleTimeString()}` : ""}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
+                    <span>in queue: {elapsed(job.waitingForMs)}</span>
+                    {job.state === "active" && <span>active: {elapsed(job.activeForMs)}</span>}
+                    {job.stageLabel && <span>stage: {job.stageLabel} ({elapsed(job.stageForMs)})</span>}
+                    {job.state === "delayed" && job.delayUntil && <span>retry: {new Date(job.delayUntil).toLocaleTimeString()}</span>}
+                  </div>
+                  <div
+                    className={cn(
+                      "mt-1 text-xs",
+                      job.diagnosis.severity === "error" && "text-destructive",
+                      job.diagnosis.severity === "warning" && "text-amber-400",
+                      job.diagnosis.severity === "info" && "text-muted-foreground",
+                    )}
+                  >
+                    {job.diagnosis.message}
+                    {job.tracking === "redis_only" && " · legacy job (no SQLite timeline)"}
                   </div>
                 </div>
                 <div className="flex gap-1">
@@ -102,12 +183,18 @@ export function QueuePage() {
                     variant="secondary"
                     size="sm"
                     onClick={() => promote(job.id)}
-                    disabled={job.priority === "high" || job.state === "active"}
+                    disabled={job.priority === "high" || job.state === "active" || busyAction !== null}
                     title="Process next"
                   >
                     <ArrowUp className="size-4" /> High
                   </Button>
-                  <Button variant="ghost" size="icon" onClick={() => cancel(job.id)} disabled={job.state === "active"} title="Cancel">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => cancel(job.id)}
+                    disabled={job.state === "active" || busyAction !== null}
+                    title="Cancel"
+                  >
                     <X className="size-4" />
                   </Button>
                 </div>

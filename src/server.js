@@ -4,6 +4,7 @@ const proxy = require("@fastify/http-proxy");
 const swagger = require("@fastify/swagger");
 const swaggerUi = require("@fastify/swagger-ui");
 const crypto = require("node:crypto");
+const os = require("node:os");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { execFile, spawn } = require("node:child_process");
@@ -46,6 +47,66 @@ const rateBuckets = new Map();
 const dashboardSessions = new Map();
 const dashboardPasswordSessions = new Map();
 const sessionsFile = path.join(config.rootDir, "data", "dashboard-sessions.json");
+const browserHealthFile = process.env.BROWSER_HEALTH_FILE || "/var/lib/gmweb/browser-health.json";
+
+function readCpuTimes() {
+  let idle = 0;
+  let total = 0;
+  for (const cpu of os.cpus()) {
+    idle += cpu.times.idle;
+    total += Object.values(cpu.times).reduce((sum, value) => sum + value, 0);
+  }
+  return { idle, total };
+}
+
+let previousCpuTimes = readCpuTimes();
+
+async function readSystemMetrics() {
+  const current = readCpuTimes();
+  const totalDelta = current.total - previousCpuTimes.total;
+  const idleDelta = current.idle - previousCpuTimes.idle;
+  previousCpuTimes = current;
+
+  let totalBytes = os.totalmem();
+  let availableBytes = os.freemem();
+  let swapTotalBytes = 0;
+  let swapFreeBytes = 0;
+  if (process.platform === "linux") {
+    try {
+      const meminfo = await fs.readFile("/proc/meminfo", "utf8");
+      const values = Object.fromEntries([...meminfo.matchAll(/^(\w+):\s+(\d+)\s+kB$/gm)].map((m) => [m[1], Number(m[2]) * 1024]));
+      totalBytes = values.MemTotal || totalBytes;
+      availableBytes = values.MemAvailable || availableBytes;
+      swapTotalBytes = values.SwapTotal || 0;
+      swapFreeBytes = values.SwapFree || 0;
+    } catch { /* os values remain available */ }
+  }
+
+  const cores = os.cpus().length;
+  const load = os.loadavg();
+  return {
+    cpu: {
+      cores,
+      usagePercent: totalDelta > 0 ? Math.round((1 - idleDelta / totalDelta) * 1000) / 10 : 0,
+      load1: Math.round(load[0] * 100) / 100,
+      load5: Math.round(load[1] * 100) / 100,
+      load15: Math.round(load[2] * 100) / 100,
+      loadPercent: cores ? Math.round((load[0] / cores) * 1000) / 10 : 0
+    },
+    memory: {
+      totalBytes,
+      availableBytes,
+      usedBytes: Math.max(0, totalBytes - availableBytes),
+      usagePercent: totalBytes ? Math.round((1 - availableBytes / totalBytes) * 1000) / 10 : 0
+    },
+    swap: {
+      totalBytes: swapTotalBytes,
+      usedBytes: Math.max(0, swapTotalBytes - swapFreeBytes),
+      usagePercent: swapTotalBytes ? Math.round((1 - swapFreeBytes / swapTotalBytes) * 1000) / 10 : 0
+    },
+    uptimeSeconds: Math.floor(os.uptime())
+  };
+}
 
 async function loadSessions() {
   try {
@@ -425,13 +486,46 @@ const SEND_TIMEOUT_MS = Math.max(240000, Number(config.sendTimeoutMs) || 240000)
 // even across restarts (backed by the SQLite ledger). Default 24h.
 const SEND_DEDUPE_MS = (Number(process.env.SEND_DEDUPE_HOURS) || 24) * 3600 * 1000;
 const SEND_FAIL_RESTART_THRESHOLD = Number(process.env.SEND_FAIL_RESTART_THRESHOLD) || 3;
+// client.recover() only drops Playwright's reference and reconnects — it
+// fixes a wedged *page*, but does nothing if the Chrome *process* itself is
+// too resource-starved to service a new CDP connection (connectOverCDP just
+// times out again, identically, on every job). If a soft recover doesn't
+// stop the failures within one more full streak, escalate to the same
+// process-level restart the "restart-chrome" admin action performs.
+const SEND_HARD_RESTART_THRESHOLD = Number(process.env.SEND_HARD_RESTART_THRESHOLD) || 2;
+const HARD_RESTART_COOLDOWN_MS = Number(process.env.HARD_RESTART_COOLDOWN_MS) || 5 * 60 * 1000;
+const browserRecoveryFile = path.join(config.rootDir, "data", "browser-recovery.json");
 // Deliberately conservative pacing for browser-driven sends. The minimum gap
 // prevents bursts; BullMQ's limiter also caps starts across a full minute.
 const SEND_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.SEND_MIN_INTERVAL_MS) || 15000);
 const SEND_MAX_PER_MINUTE = Math.max(1, Number(process.env.SEND_MAX_PER_MINUTE) || 4);
 let sendFailStreak = 0;
 let recovering = false;
+let recoverEscalations = 0;
+let lastHardRestartAt = 0;
 let lastSendStartedAt = 0;
+let hardRecoveryScheduled = false;
+
+function isBrowserAutomationWedge(error) {
+  const text = String(error?.message || error || "");
+  return /send_timeout|browser_lock_.*timeout|connectOverCDP.*Timeout|Target page.*closed/i.test(text);
+}
+
+async function scheduleHardBrowserRecovery(reason, jobId) {
+  if (hardRecoveryScheduled || process.platform === "win32") return false;
+  let previous = {};
+  try { previous = JSON.parse(await fs.readFile(browserRecoveryFile, "utf8")); } catch { /* first recovery */ }
+  if (Date.now() - Number(previous.at || 0) < HARD_RESTART_COOLDOWN_MS) return false;
+
+  hardRecoveryScheduled = true;
+  const record = { at: Date.now(), reason: String(reason || "browser_unresponsive"), jobId: String(jobId || "") };
+  await fs.writeFile(browserRecoveryFile, JSON.stringify(record, null, 2), "utf8").catch(() => {});
+  app.log.error({ reason: record.reason, jobId: record.jobId }, "browser automation wedged; scheduling hard recovery");
+  emitSse({ type: "browser_hard_restart", reason: record.reason, jobId: record.jobId, at: new Date().toISOString() });
+  scheduleSystemctl(["restart", "gmweb-chrome.service"]);
+  setTimeout(() => scheduleSystemctl(["restart", "gmweb-api.service"]), 2500);
+  return true;
+}
 
 async function waitForSendPace(job) {
   const waitMs = Math.max(0, lastSendStartedAt + SEND_MIN_INTERVAL_MS - Date.now());
@@ -526,8 +620,13 @@ function startSendWorker() {
           new Promise((_, reject) => setTimeout(() => reject(new Error("send_timeout")), SEND_TIMEOUT_MS))
         ]);
         sendFailStreak = 0; // a success clears the streak
+        recoverEscalations = 0; // and proves the browser is genuinely healthy again
         return result;
       } catch (error) {
+        if (isBrowserAutomationWedge(error)) {
+          sendStore.markStage(job.id, "browser_unresponsive");
+          await scheduleHardBrowserRecovery(error.message, job.id);
+        }
         if (error?.code === "GOOGLE_CONVERSATION_RATE_LIMIT") {
           await sendQueue.pause();
           app.log.warn("send queue auto-paused after Google limited new conversations");
@@ -586,12 +685,34 @@ function startSendWorker() {
         if (sendFailStreak >= SEND_FAIL_RESTART_THRESHOLD && !recovering) {
           recovering = true;
           sendFailStreak = 0;
-          app.log.warn(`auto-recovering browser after ${SEND_FAIL_RESTART_THRESHOLD} consecutive send failures`);
-          emitSse({ type: "browser_recovering", at: new Date().toISOString() });
-          client.recover()
-            .then(() => app.log.info("browser recover complete"))
-            .catch((e) => app.log.warn({ e }, "browser recover failed"))
-            .finally(() => { recovering = false; });
+          recoverEscalations += 1;
+
+          // A soft recover already failed to clear a full streak once before —
+          // reconnecting Playwright's reference isn't enough (seen in
+          // production: every job failing identically on
+          // "connectOverCDP: Timeout 30000ms exceeded" while the CDP port
+          // still answered plain HTTP pings, i.e. Chrome itself was too
+          // starved to service a new automation session). Escalate to a real
+          // process restart, the same action "restart-chrome" performs.
+          const hardRestartDue = recoverEscalations >= SEND_HARD_RESTART_THRESHOLD &&
+            Date.now() - lastHardRestartAt > HARD_RESTART_COOLDOWN_MS;
+
+          if (hardRestartDue) {
+            lastHardRestartAt = Date.now();
+            recoverEscalations = 0;
+            app.log.warn("hard-restarting Chrome after repeated failed soft-recoveries");
+            emitSse({ type: "browser_hard_restart", at: new Date().toISOString() });
+            scheduleSystemctl(["restart", "gmweb-chrome.service"]);
+            setTimeout(() => scheduleSystemctl(["restart", "gmweb-api.service"]), 2500);
+            recovering = false; // this process is about to be restarted anyway
+          } else {
+            app.log.warn(`auto-recovering browser after ${SEND_FAIL_RESTART_THRESHOLD} consecutive send failures`);
+            emitSse({ type: "browser_recovering", at: new Date().toISOString() });
+            client.recover()
+              .then(() => app.log.info("browser recover complete"))
+              .catch((e) => app.log.warn({ e }, "browser recover failed"))
+              .finally(() => { recovering = false; });
+          }
         }
       },
       onError: (err) => app.log.warn({ err }, "send worker error")
@@ -790,6 +911,72 @@ function parseLimit(value, fallback, max) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(1, Math.min(parsed, max));
+}
+
+const STAGE_LABELS = {
+  pacing: "Waiting for send pacing",
+  legacy_queued: "Imported from the existing Redis backlog",
+  legacy_active: "Active job imported from the existing Redis backlog",
+  checking_paired: "Checking Google Messages session",
+  opening: "Opening recipient conversation",
+  locating: "Searching existing conversations",
+  conversation_pacing: "Waiting before opening a new conversation",
+  start_chat: "Opening Start chat",
+  opening_start_chat: "Opening Start chat",
+  restarting_start_chat: "Retrying Start chat",
+  recipient_input_ready: "Recipient field ready",
+  recipient_filled: "Recipient entered",
+  selecting_recipient: "Selecting recipient",
+  open_by_url: "Opening cached conversation URL",
+  typing: "Typing and sending message",
+  send_unverified: "Send was not confirmed; retrying UI",
+  retrying_without_reload: "Retrying without reloading Messages",
+  browser_unresponsive: "Chrome automation is unresponsive; recovery scheduled",
+  google_rate_limited: "Google asked the gateway to wait",
+  sent: "Send confirmed",
+  failed: "Send attempt failed"
+};
+
+function enrichQueueJob(job) {
+  const now = Date.now();
+  const ledger = sendStore.byJob(job.id);
+  const createdMs = Date.parse(job.createdAt || "") || ledger?.created_at || now;
+  const processedMs = Date.parse(job.processedAt || "") || ledger?.active_at || 0;
+  const stageMs = ledger?.stage_at || ledger?.updated_at || 0;
+  const activeForMs = job.state === "active" && processedMs ? now - processedMs : 0;
+  const waitingForMs = job.state === "waiting" || job.state === "paused" || job.state === "delayed"
+    ? now - createdMs : Math.max(0, processedMs - createdMs);
+  const stage = ledger?.stage || null;
+  const stageForMs = stageMs ? Math.max(0, now - stageMs) : 0;
+
+  let diagnosis = { code: "queued", severity: "info", message: "Waiting for its turn in the queue" };
+  if (job.state === "delayed") {
+    diagnosis = {
+      code: "retry_backoff", severity: "warning",
+      message: job.failedReason ? `Retry scheduled after: ${job.failedReason}` : "Waiting for retry delay"
+    };
+  } else if (job.state === "active") {
+    if (stage === "browser_unresponsive" || activeForMs >= SEND_TIMEOUT_MS) {
+      diagnosis = { code: "browser_unresponsive", severity: "error", message: "Chrome/Google Messages automation is hung; automatic recovery is scheduled" };
+    } else if (!stage && activeForMs > 15000) {
+      diagnosis = { code: "waiting_browser_lock", severity: "warning", message: "Waiting for the browser automation lock; a previous browser action may be stuck" };
+    } else {
+      diagnosis = { code: stage || "starting", severity: activeForMs > 120000 ? "warning" : "info", message: STAGE_LABELS[stage] || "Starting browser operation" };
+    }
+  }
+
+  return {
+    ...job,
+    stage,
+    stageLabel: stage ? (STAGE_LABELS[stage] || stage) : null,
+    stageAt: stageMs ? new Date(stageMs).toISOString() : null,
+    ageMs: Math.max(0, now - createdMs),
+    waitingForMs,
+    activeForMs,
+    stageForMs,
+    tracking: ledger ? "sqlite" : "redis_only",
+    diagnosis
+  };
 }
 
 function runCommand(command, args, options = {}) {
@@ -1023,6 +1210,34 @@ app.get("/admin/overview", {
               status: { type: "object", additionalProperties: true }
             }
           },
+          browserAutomation: { type: "object", additionalProperties: true },
+          system: {
+            type: "object",
+            properties: {
+              cpu: {
+                type: "object",
+                properties: {
+                  cores: { type: "integer" }, usagePercent: { type: "number" },
+                  load1: { type: "number" }, load5: { type: "number" }, load15: { type: "number" },
+                  loadPercent: { type: "number" }
+                }
+              },
+              memory: {
+                type: "object",
+                properties: {
+                  totalBytes: { type: "integer" }, availableBytes: { type: "integer" },
+                  usedBytes: { type: "integer" }, usagePercent: { type: "number" }
+                }
+              },
+              swap: {
+                type: "object",
+                properties: {
+                  totalBytes: { type: "integer" }, usedBytes: { type: "integer" }, usagePercent: { type: "number" }
+                }
+              },
+              uptimeSeconds: { type: "integer" }
+            }
+          },
           services: { type: "array", items: { type: "object", additionalProperties: true } }
         }
       }
@@ -1030,6 +1245,7 @@ app.get("/admin/overview", {
   }
 }, async () => {
   let readiness;
+  let browserAutomation = { ok: null, code: "not_checked" };
   try {
     // Non-blocking: serves the cached pairing status so this endpoint never
     // queues behind in-flight sends on the single browser lock.
@@ -1038,6 +1254,9 @@ app.get("/admin/overview", {
   } catch (error) {
     readiness = { ready: false, error: error.message };
   }
+  try {
+    browserAutomation = JSON.parse(await fs.readFile(browserHealthFile, "utf8"));
+  } catch { /* watchdog has not written its first probe yet */ }
 
   const services = await Promise.all([
     serviceInfo("gmweb-chrome.service"),
@@ -1045,6 +1264,7 @@ app.get("/admin/overview", {
     serviceInfo("gmweb-vnc.service"),
     serviceInfo("gmweb-novnc.service")
   ]);
+  const system = await readSystemMetrics();
 
   return {
     ok: true,
@@ -1059,6 +1279,8 @@ app.get("/admin/overview", {
         services.some((service) => service.name === "gmweb-novnc.service" && service.active === "active")
     },
     readiness,
+    browserAutomation,
+    system,
     services
   };
 });
@@ -1559,7 +1781,10 @@ app.post("/send", {
   // flight, suppress it instead of sending again.
   let ledgerId = null;
   if (!idemKey) {
-    const claim = sendStore.claim({ to, text, keyName: projectKey?.name || "master", windowMs: SEND_DEDUPE_MS });
+    const claim = sendStore.claim({
+      to, text, keyName: projectKey?.name || "master",
+      priority: highPriority ? "high" : "normal", windowMs: SEND_DEDUPE_MS
+    });
     if (claim.action !== "new") {
       app.log.warn({ to, reason: claim.action }, "duplicate send suppressed by ledger");
       reply.code(200);
@@ -1573,6 +1798,11 @@ app.post("/send", {
       };
     }
     ledgerId = claim.id;
+  } else {
+    ledgerId = sendStore.create({
+      to, text, keyName: projectKey?.name || "master",
+      priority: highPriority ? "high" : "normal", idempotencyKey: idemKey
+    });
   }
 
   let job;
@@ -1810,7 +2040,28 @@ app.get("/admin/queue/jobs", {
                 keyName: { type: ["string", "null"] },
                 priority: { type: "string", enum: ["high", "normal"] },
                 attemptsMade: { type: "integer" },
-                createdAt: { type: ["string", "null"] }
+                maxAttempts: { type: "integer" },
+                failedReason: { type: ["string", "null"] },
+                createdAt: { type: ["string", "null"] },
+                processedAt: { type: ["string", "null"] },
+                finishedAt: { type: ["string", "null"] },
+                delayUntil: { type: ["string", "null"] },
+                stage: { type: ["string", "null"] },
+                stageLabel: { type: ["string", "null"] },
+                stageAt: { type: ["string", "null"] },
+                ageMs: { type: "integer" },
+                waitingForMs: { type: "integer" },
+                activeForMs: { type: "integer" },
+                stageForMs: { type: "integer" },
+                tracking: { type: "string", enum: ["sqlite", "redis_only"] },
+                diagnosis: {
+                  type: "object",
+                  properties: {
+                    code: { type: "string" },
+                    severity: { type: "string", enum: ["info", "warning", "error"] },
+                    message: { type: "string" }
+                  }
+                }
               }
             }
           }
@@ -1820,7 +2071,8 @@ app.get("/admin/queue/jobs", {
   }
 }, async (request) => {
   const limit = parseLimit(request.query.limit, 100, 500);
-  return { jobs: await sendQueue.listJobs({ limit }) };
+  const jobs = await sendQueue.listJobs({ limit });
+  return { jobs: jobs.map(enrichQueueJob) };
 });
 
 app.post("/admin/queue/jobs/:id/promote", {
@@ -1850,8 +2102,10 @@ app.delete("/admin/queue/jobs/:id", {
     params: { type: "object", properties: { id: { type: "string" } } }
   }
 }, async (request, reply) => {
+  const ledger = sendStore.byJob(request.params.id);
   const ok = await sendQueue.removeJob(request.params.id);
   if (!ok) { reply.code(404).send({ error: "not_found" }); return; }
+  if (ledger) sendStore.markById(ledger.id, "cancelled", "cancelled_by_admin");
   return { ok: true };
 });
 
@@ -2099,6 +2353,17 @@ async function reconcilePending() {
   if (restored) app.log.info(`reconciled ${restored} unfinished send(s) from the ledger into the queue`);
 }
 
+async function backfillPendingLedger() {
+  const jobs = await sendQueue.pendingJobsForLedger(2000);
+  let imported = 0;
+  for (const job of jobs) {
+    try { if (sendStore.backfillPending(job)) imported += 1; } catch (error) {
+      app.log.warn({ jobId: job.jobId, error: error.message }, "pending ledger backfill failed");
+    }
+  }
+  if (imported) app.log.info({ imported }, "backfilled Redis backlog into SQLite send ledger");
+}
+
 async function initializeBrowserAndConversationIndex({ resumeAfterWarm }) {
   try {
     await client.start();
@@ -2131,18 +2396,30 @@ async function main() {
   const queueWasPaused = await sendQueue.isPaused().catch(() => true);
   if (!queueWasPaused) await sendQueue.pause();
   startSendWorker();
+  await backfillPendingLedger().catch((error) => app.log.warn({ error: error.message }, "ledger backfill failed"));
   await reconcilePending().catch((error) => app.log.warn({ error: error.message }, "reconcile failed"));
   await app.listen({ host: config.host, port: config.port });
   initializeBrowserAndConversationIndex({ resumeAfterWarm: !queueWasPaused });
 }
 
+let shutdownStarted = false;
 async function shutdown(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   app.log.info({ signal }, "shutting down");
-  await sendQueue.close().catch((error) => app.log.warn({ error }, "queue close failed"));
+  // npm/systemd may deliver the stop signal more than once, and a wedged
+  // Playwright/BullMQ promise must never consume systemd's 90s stop timeout.
+  // Redis + SQLite are durable, so a bounded hard exit is recovery-safe.
+  const forceExit = setTimeout(() => process.exit(0), 8000);
+  // Redis owns the durable job state. Force-closing the worker lets systemd
+  // recovery terminate a wedged browser action immediately; BullMQ reclaims
+  // the interrupted active job after restart instead of blocking StopTimeout.
+  await sendQueue.close({ force: true }).catch((error) => app.log.warn({ error }, "queue close failed"));
   try { sendStore.close(); } catch (error) { app.log.warn({ error }, "ledger close failed"); }
   if (config.browserMode === "connect") client.detachForShutdown();
   else await client.stop().catch((error) => app.log.warn({ error }, "browser stop failed"));
   await app.close().catch((error) => app.log.warn({ error }, "server close failed"));
+  clearTimeout(forceExit);
   process.exit(0);
 }
 

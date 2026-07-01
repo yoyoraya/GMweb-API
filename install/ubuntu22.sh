@@ -190,6 +190,9 @@ Environment=USER_DATA_DIR=$APP_DIR/data/browser-profile
 Environment=DISPLAY_ID=$DISPLAY_ID
 Environment=BROWSER_CDP_PORT=$CDP_PORT
 ExecStart=$APP_DIR/scripts/vps-chrome.sh
+CPUAccounting=true
+MemoryAccounting=true
+CPUWeight=50
 Restart=always
 RestartSec=5
 
@@ -209,6 +212,9 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/npm start
+CPUAccounting=true
+MemoryAccounting=true
+CPUWeight=200
 Restart=always
 RestartSec=5
 
@@ -228,6 +234,7 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR
 Environment=DISPLAY_ID=$DISPLAY_ID
 ExecStart=$APP_DIR/scripts/pairing-vnc.sh
+CPUWeight=20
 Restart=always
 RestartSec=5
 

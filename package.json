@@ -1,6 +1,6 @@
 {
   "name": "gmweb-api",
-  "version": "0.3.12",
+  "version": "0.3.14",
   "private": true,
   "description": "GMweb API: OpenWA-style HTTP bridge for Google Messages for Web.",
   "main": "src/server.js",
@@ -10,6 +10,7 @@
     "login": "node src/openLoginChrome.js",
     "smoke": "node scripts/smoke.js",
     "doctor": "node scripts/doctor.js",
+    "probe:browser": "node scripts/browser-probe.js",
     "token": "node scripts/new-token.js",
     "export:openapi": "node scripts/export-openapi.js",
     "generate:openapi": "node scripts/generate-openapi.js",

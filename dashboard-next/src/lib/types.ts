@@ -23,6 +23,13 @@ export interface Overview {
   ok: boolean;
   version: string;
   readiness?: { ready: boolean; status?: Record<string, unknown> };
+  browserAutomation?: { ok: boolean | null; code: string; latencyMs?: number; error?: string };
+  system?: {
+    cpu: { cores: number; usagePercent: number; load1: number; load5: number; load15: number; loadPercent: number };
+    memory: { totalBytes: number; availableBytes: number; usedBytes: number; usagePercent: number };
+    swap: { totalBytes: number; usedBytes: number; usagePercent: number };
+    uptimeSeconds: number;
+  };
   vnc?: { ready?: boolean };
   services?: Array<{ name: string; active: string; enabled: string }>;
 }
@@ -44,7 +51,25 @@ export interface QueueJob {
   keyName: string | null;
   priority: "high" | "normal";
   attemptsMade: number;
+  maxAttempts: number;
+  failedReason: string | null;
   createdAt: string | null;
+  processedAt: string | null;
+  finishedAt: string | null;
+  delayUntil: string | null;
+  stage: string | null;
+  stageLabel: string | null;
+  stageAt: string | null;
+  ageMs: number;
+  waitingForMs: number;
+  activeForMs: number;
+  stageForMs: number;
+  tracking: "sqlite" | "redis_only";
+  diagnosis: {
+    code: string;
+    severity: "info" | "warning" | "error";
+    message: string;
+  };
 }
 
 export interface Conversation {

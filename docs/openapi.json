@@ -3,7 +3,7 @@
   "info": {
     "title": "GMweb API",
     "description": "Google Messages SMS/RCS gateway — control Google Messages Web via a REST API.\n\n## Authentication\nAll endpoints (except `/health`) require a Bearer token in the `Authorization` header.\n\nTwo token types are accepted:\n- **Master token** (`API_TOKEN` env var) — full access to all endpoints including admin and key management.\n- **Project API key** (`gmw_...`) — access to messaging & conversation endpoints only. Admin routes return 401.\n\n```\nAuthorization: Bearer gmw_your_project_token\n```\n\n## Rate Limits\nProject keys have configurable per-minute and per-hour send limits.\nRepeated auth failures from an IP trigger a 30-minute block.",
-    "version": "0.3.12",
+    "version": "0.3.14",
     "contact": {
       "name": "GMweb API"
     }
@@ -570,6 +570,72 @@
                         "status": {
                           "type": "object",
                           "additionalProperties": true
+                        }
+                      }
+                    },
+                    "browserAutomation": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "system": {
+                      "type": "object",
+                      "properties": {
+                        "cpu": {
+                          "type": "object",
+                          "properties": {
+                            "cores": {
+                              "type": "integer"
+                            },
+                            "usagePercent": {
+                              "type": "number"
+                            },
+                            "load1": {
+                              "type": "number"
+                            },
+                            "load5": {
+                              "type": "number"
+                            },
+                            "load15": {
+                              "type": "number"
+                            },
+                            "loadPercent": {
+                              "type": "number"
+                            }
+                          }
+                        },
+                        "memory": {
+                          "type": "object",
+                          "properties": {
+                            "totalBytes": {
+                              "type": "integer"
+                            },
+                            "availableBytes": {
+                              "type": "integer"
+                            },
+                            "usedBytes": {
+                              "type": "integer"
+                            },
+                            "usagePercent": {
+                              "type": "number"
+                            }
+                          }
+                        },
+                        "swap": {
+                          "type": "object",
+                          "properties": {
+                            "totalBytes": {
+                              "type": "integer"
+                            },
+                            "usedBytes": {
+                              "type": "integer"
+                            },
+                            "usagePercent": {
+                              "type": "number"
+                            }
+                          }
+                        },
+                        "uptimeSeconds": {
+                          "type": "integer"
                         }
                       }
                     },
@@ -1596,11 +1662,94 @@
                           "attemptsMade": {
                             "type": "integer"
                           },
+                          "maxAttempts": {
+                            "type": "integer"
+                          },
+                          "failedReason": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
                           "createdAt": {
                             "type": [
                               "null",
                               "string"
                             ]
+                          },
+                          "processedAt": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "finishedAt": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "delayUntil": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "stage": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "stageLabel": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "stageAt": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "ageMs": {
+                            "type": "integer"
+                          },
+                          "waitingForMs": {
+                            "type": "integer"
+                          },
+                          "activeForMs": {
+                            "type": "integer"
+                          },
+                          "stageForMs": {
+                            "type": "integer"
+                          },
+                          "tracking": {
+                            "type": "string",
+                            "enum": [
+                              "sqlite",
+                              "redis_only"
+                            ]
+                          },
+                          "diagnosis": {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string"
+                              },
+                              "severity": {
+                                "type": "string",
+                                "enum": [
+                                  "info",
+                                  "warning",
+                                  "error"
+                                ]
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            }
                           }
                         }
                       }

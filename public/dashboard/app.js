@@ -23,7 +23,7 @@ const newMessageMap = loadNewMessageMap();
 
 async function api(path, options = {}) {
   const headers = {
-    "Content-Type": "application/json",
+    ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
     ...(state.csrfToken ? { "X-CSRF-Token": state.csrfToken } : {}),
     ...(options.headers || {})
   };
@@ -689,7 +689,7 @@ async function loadQueue() {
 
       const badge = document.createElement("span");
       badge.className = "qPriority " + (job.priority === "high" ? "qHigh" : "qNormal");
-      badge.textContent = job.priority === "high" ? "HIGH" : job.state;
+      badge.textContent = `${job.state}${job.priority === "high" ? " · HIGH" : ""}`;
       row.appendChild(badge);
 
       const body = document.createElement("div");
@@ -702,8 +702,14 @@ async function loadQueue() {
       const meta = document.createElement("small");
       meta.className = "qMeta";
       const when = job.createdAt ? new Date(job.createdAt).toLocaleTimeString() : "";
-      meta.textContent = `${job.keyName || "—"} · ${when}${job.attemptsMade ? ` · try ${job.attemptsMade}` : ""}`;
-      body.append(to, txt, meta);
+      const seconds = (ms) => `${Math.floor((Number(ms) || 0) / 1000)}s`;
+      meta.textContent = `${job.keyName || "—"} · queued ${when} · attempt ${job.attemptsMade + (job.state === "active" ? 1 : 0)}/${job.maxAttempts || 3} · wait ${seconds(job.waitingForMs)}${job.state === "active" ? ` · active ${seconds(job.activeForMs)}` : ""}`;
+      const detail = document.createElement("small");
+      detail.className = "qMeta";
+      detail.textContent = `${job.stageLabel ? `${job.stageLabel} · ` : ""}${job.diagnosis?.message || ""}`;
+      if (job.diagnosis?.severity === "error") detail.style.color = "var(--bad)";
+      if (job.diagnosis?.severity === "warning") detail.style.color = "#fbbf24";
+      body.append(to, txt, meta, detail);
       row.appendChild(body);
 
       const actions = document.createElement("div");

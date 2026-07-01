@@ -1,7 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { GoogleMessagesClient } = require("../src/googleMessagesClient");
 const { SendQueue } = require("../src/queue");
+const { SendStore } = require("../src/sendStore");
 
 function client() {
   return new GoogleMessagesClient({
@@ -117,4 +121,74 @@ test("dashboard status refresh is single-flight and skipped during sidebar warm-
   assert.equal(calls, 1);
   release();
   await c.statusRefreshPromise;
+});
+
+test("browser lock timeout includes time spent waiting for the previous owner", async () => {
+  const c = client();
+  c.actionLock = new Promise(() => {});
+  const started = Date.now();
+  await assert.rejects(
+    c.withBrowserLock(async () => true, { timeoutMs: 30 }),
+    /browser_lock_wait_timeout/
+  );
+  assert(Date.now() - started < 500);
+});
+
+test("idempotent sends receive a complete durable SQLite timeline", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gmweb-send-store-"));
+  const store = new SendStore(path.join(dir, "sends.db"));
+  try {
+    const id = store.create({
+      to: "+989000000000", text: "test", keyName: "eve",
+      priority: "high", idempotencyKey: "test-idem"
+    });
+    store.attachJob(id, "42");
+    store.markStatus("42", "active", { attempts: 1 });
+    store.markStage("42", "typing");
+    const row = store.byJob("42");
+    assert.equal(row.priority, "high");
+    assert.equal(row.idempotency_key, "test-idem");
+    assert.equal(row.status, "active");
+    assert.equal(row.stage, "typing");
+    assert(row.queued_at > 0);
+    assert(row.active_at > 0);
+    assert(row.stage_at > 0);
+    assert.equal(store.backfillPending({
+      jobId: "legacy-1", state: "waiting", to: "+989000000001", text: "legacy",
+      keyName: "eve", priority: "normal", attempts: 1, createdAt: Date.now() - 5000
+    }), true);
+    const legacy = store.byJob("legacy-1");
+    assert.equal(legacy.stage, "legacy_queued");
+    assert.equal(legacy.status, "queued");
+    assert.equal(store.backfillPending({ jobId: "legacy-1" }), false);
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("persisted conversation index skips expensive startup sidebar expansion", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gmweb-index-"));
+  const file = path.join(dir, "conversation-index.json");
+  fs.writeFileSync(file, JSON.stringify([
+    { href: "/web/conversations/abc", title: "Saved", text: "Saved", timestamp: "Jun 1" }
+  ]));
+  try {
+    const c = new GoogleMessagesClient({
+      sendMinIntervalMs: 1000,
+      conversationHistoryMaxBatches: 80,
+      conversationIndexMaxBatches: 6,
+      conversationIndexBudgetMs: 45000,
+      conversationCacheFile: path.join(dir, "recipient-cache.json"),
+      conversationIndexFile: file
+    });
+    assert.equal(c.sidebarConversationIndex.size, 1);
+    assert.equal(c.sidebarIndexReady, true);
+    c.ensurePage = async () => { throw new Error("startup should not touch the page"); };
+    const stats = await c.warmConversationIndex();
+    assert.equal(stats.loadedFromDisk, true);
+    assert.equal(stats.rows, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

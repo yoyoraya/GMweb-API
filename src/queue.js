@@ -200,7 +200,38 @@ class SendQueue {
         keyName: job.data?.keyName || null,
         priority: job.data?.priority === "high" || job.opts?.lifo ? "high" : "normal",
         attemptsMade: job.attemptsMade || 0,
-        createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null
+        maxAttempts: job.opts?.attempts || 1,
+        failedReason: job.failedReason || null,
+        createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
+        processedAt: job.processedOn ? new Date(job.processedOn).toISOString() : null,
+        finishedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
+        delayUntil: job.delay ? new Date(job.timestamp + job.delay).toISOString() : null,
+        deferCount: Number(job.data?.deferCount || 0)
+      });
+    }
+    return out;
+  }
+
+  // Internal-only full payloads used to migrate pre-ledger Redis backlog into
+  // SQLite. Never return this shape directly from an HTTP route (it contains
+  // complete message text and idempotency metadata).
+  async pendingJobsForLedger(limit = 1000) {
+    const jobs = await this.queue.getJobs(["active", "waiting", "paused", "delayed"], 0, Math.max(0, limit - 1), false);
+    const out = [];
+    for (const job of jobs) {
+      if (!job) continue;
+      out.push({
+        jobId: String(job.id),
+        state: await job.getState().catch(() => "waiting"),
+        to: job.data?.to || "",
+        text: job.data?.text || "",
+        keyName: job.data?.keyName || null,
+        priority: job.data?.priority === "high" || job.opts?.lifo ? "high" : "normal",
+        idempotencyKey: job.data?._idempotencyKey || null,
+        attempts: job.attemptsMade || 0,
+        createdAt: job.timestamp || Date.now(),
+        processedAt: job.processedOn || null,
+        failedReason: job.failedReason || null
       });
     }
     return out;
@@ -253,8 +284,8 @@ class SendQueue {
     return this.worker;
   }
 
-  async close() {
-    await this.worker?.close().catch(() => {});
+  async close({ force = false } = {}) {
+    await this.worker?.close(force).catch(() => {});
     await this.events?.close().catch(() => {});
     await this.queue?.close().catch(() => {});
   }

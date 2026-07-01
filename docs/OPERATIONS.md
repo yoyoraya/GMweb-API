@@ -1,5 +1,32 @@
 # GMweb API Operations
 
+## Browser automation health and automatic recovery
+
+`gmweb-monitor.timer` runs every two minutes. In addition to `/health` and
+`/ready`, it launches `scripts/browser-probe.js`, which opens an independent
+Playwright CDP connection and evaluates a tiny expression in the real Google
+Messages page. This detects the otherwise invisible failure where VNC still
+paints and `/ready` returns cached `paired:true`, but Chrome no longer accepts
+automation commands. Two consecutive failed probes restart `gmweb-chrome` and
+`gmweb-api`. A send-level browser/lock timeout triggers the same recovery
+immediately, with a persistent five-minute cooldown.
+
+The dashboard Overview card reports `automation_healthy` or `Hung`. The Queue
+page reports queued/started timestamps, waiting and active durations, current
+browser stage, time in that stage, attempts, SQLite tracking status, and a
+plain-language diagnosis. Existing Redis backlog is imported into SQLite on
+startup; all new sends, including sends using `Idempotency-Key`, are recorded
+there from acceptance onward.
+
+Overview also reports total CPU utilization/core count/load averages and
+available/used RAM and swap. Conversation discovery is persisted in
+`data/conversation-index.json`: restart uses that index immediately, while the
+first run is capped by `CONVERSATION_INDEX_MAX_BATCHES` and
+`CONVERSATION_INDEX_BUDGET_MS`. After first-run indexing, GMweb reloads the
+conversation page to release the expanded sidebar DOM. Systemd CPU weights
+favor `gmweb-api` over Chrome under contention so health and admin controls
+remain responsive without throttling Chrome while spare CPU exists.
+
 ## Server Manager
 
 On Ubuntu installs, run:

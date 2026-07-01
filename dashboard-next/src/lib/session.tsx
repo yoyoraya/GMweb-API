@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { api, setCsrfToken } from "./api";
+import { api, setCsrfToken, setUnauthorizedHandler } from "./api";
 import type { SessionInfo } from "./types";
 
 interface SessionState {
@@ -31,9 +31,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => {
+    // Any page's background poll can be the one that discovers the session
+    // is stale (TTL expiry, server restart, or a mismatched CSRF token from
+    // a duplicate login). Re-check against the server's truth: if there's
+    // still a valid session this silently resyncs the csrf token, otherwise
+    // it drops `authenticated` so Gate falls back to the login screen —
+    // either way the page stops being invisibly stuck.
+    setUnauthorizedHandler(() => {
+      refresh().catch(() => {
+        setAuthenticated(false);
+        setCsrfToken(null);
+      });
+    });
     refresh()
       .catch(() => {})
       .finally(() => setReady(true));
+    return () => setUnauthorizedHandler(null);
   }, []);
 
   async function passwordLogin(username: string, password: string) {
