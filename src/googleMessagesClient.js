@@ -53,6 +53,10 @@ class GoogleMessagesClient extends EventEmitter {
     this.sidebarIndexWarmPromise = null;
     this.sidebarIndexWriteTimer = null;
     this.statusRefreshPromise = null;
+    // Google occasionally moves the paired Messages session to another tab or
+    // browser and blocks this page with "Use Google Messages for web here?".
+    // Keep the last automatic claim visible in status/diagnostics.
+    this.lastSessionClaimAt = null;
     this.sidebarIndexStats = {
       rows: this.sidebarConversationIndex.size,
       batches: 0,
@@ -159,6 +163,7 @@ class GoogleMessagesClient extends EventEmitter {
 
   async statusUnlocked() {
     const page = await this.ensurePage();
+    const sessionClaimed = await this.claimMessagesSessionIfNeeded(page);
     const title = await page.title().catch(() => "");
     const url = page.url();
     const bodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
@@ -192,6 +197,8 @@ class GoogleMessagesClient extends EventEmitter {
       paired,
       qrVisible,
       signInVisible: needsSignIn,
+      sessionClaimed,
+      sessionClaimedAt: this.lastSessionClaimAt,
       hint: this.buildStatusHint(bodyText, qrVisible, paired, needsSignIn)
     };
     // Refresh the cache on every live status read (also done by the background
@@ -262,6 +269,57 @@ class GoogleMessagesClient extends EventEmitter {
     if (qrVisible) return "scan the QR code with Google Messages on your phone";
     if (/Use Messages for web|Messages for web|Scan/i.test(bodyText)) return "pairing screen";
     return "unknown page state";
+  }
+
+  // Claim this browser when Google displays its single-active-web-session
+  // prompt. The exact button text and surrounding prompt are both verified so
+  // an unrelated button can never be clicked accidentally.
+  async claimMessagesSessionIfNeeded(page = this.page) {
+    if (!page || page.isClosed?.()) return false;
+    if (!/messages\.google\.com\/web/i.test(page.url?.() || "")) return false;
+
+    const dialogSelectors = [
+      "[role='dialog']",
+      "mat-dialog-container",
+      ".mdc-dialog"
+    ];
+    const promptPattern = /Use Google Messages for web here\?|open in more than one tab or browser/i;
+    let promptVisible = false;
+    for (const selector of dialogSelectors) {
+      try {
+        const dialog = page.locator(selector).filter({ hasText: promptPattern }).first();
+        if (await dialog.isVisible({ timeout: 350 })) {
+          promptVisible = true;
+          break;
+        }
+      } catch {
+        // Try the next known dialog container.
+      }
+    }
+    if (!promptVisible) return false;
+
+    const buttonSelectors = [
+      "[role='dialog'] button:has-text('Use here')",
+      "[role='dialog'] [role='button']:has-text('Use here')",
+      "mat-dialog-container button:has-text('Use here')",
+      ".mdc-dialog button:has-text('Use here')"
+    ];
+    for (const selector of buttonSelectors) {
+      try {
+        const button = page.locator(selector).first();
+        if (!await button.isVisible({ timeout: 350 })) continue;
+        const label = String(await button.innerText({ timeout: 500 })).trim();
+        if (!/^Use here$/i.test(label)) continue;
+        await button.click({ timeout: 3000 });
+        await button.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
+        this.lastSessionClaimAt = new Date().toISOString();
+        this.emit("session:claimed", { at: this.lastSessionClaimAt });
+        return true;
+      } catch {
+        // Another observer may already have dismissed it; try the next shape.
+      }
+    }
+    return false;
   }
 
   async screenshot() {

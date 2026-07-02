@@ -192,3 +192,53 @@ test("persisted conversation index skips expensive startup sidebar expansion", a
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Google Messages single-session prompt selects only the exact Use here action", async () => {
+  const c = client();
+  let clicks = 0;
+  const hiddenWaits = [];
+  const dialog = {
+    filter: ({ hasText }) => {
+      assert(hasText.test("Use Google Messages for web here?"));
+      return dialog;
+    },
+    first: () => dialog,
+    isVisible: async () => true
+  };
+  const button = {
+    first: () => button,
+    isVisible: async () => true,
+    innerText: async () => "Use here",
+    click: async () => { clicks += 1; },
+    waitFor: async (options) => { hiddenWaits.push(options.state); }
+  };
+  const page = {
+    isClosed: () => false,
+    url: () => "https://messages.google.com/web/conversations",
+    locator: (selector) => selector === "[role='dialog']" ? dialog : button
+  };
+
+  const claimed = await c.claimMessagesSessionIfNeeded(page);
+  assert.equal(claimed, true);
+  assert.equal(clicks, 1);
+  assert.deepEqual(hiddenWaits, ["hidden"]);
+  assert.match(c.lastSessionClaimAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("session claim ignores a similarly named action without the Google prompt", async () => {
+  const c = client();
+  let clicks = 0;
+  const missingDialog = {
+    filter: () => missingDialog,
+    first: () => missingDialog,
+    isVisible: async () => false
+  };
+  const page = {
+    isClosed: () => false,
+    url: () => "https://messages.google.com/web/conversations",
+    locator: () => missingDialog
+  };
+  const claimed = await c.claimMessagesSessionIfNeeded(page);
+  assert.equal(claimed, false);
+  assert.equal(clicks, 0);
+});

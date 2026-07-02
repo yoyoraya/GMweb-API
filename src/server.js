@@ -471,6 +471,10 @@ client.on("conversation:changed", (event) => {
   emitSse(event);
   postWebhook(event);
 });
+client.on("session:claimed", (event) => {
+  app.log.warn({ at: event.at }, "Google Messages requested this web session; selected Use here automatically");
+  emitSse({ type: "browser_session_claimed", at: event.at });
+});
 // Note: message send lifecycle SSE/webhooks are emitted by the queue worker
 // (with jobId), so we no longer mirror client's internal "message:sent" here.
 client.on("error", (error) => app.log.warn({ error }, "client error"));
