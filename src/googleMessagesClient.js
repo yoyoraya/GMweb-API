@@ -355,7 +355,10 @@ class GoogleMessagesClient extends EventEmitter {
     if (await this.openExistingConversation(to)) return true;
 
     // 3. New number — Start-chat UI flow.
-    const conversationWaitMs = Math.max(0, this.lastConversationOpenAt + this.conversationOpenIntervalMs - Date.now());
+    const baseWaitMs = Math.max(0, this.lastConversationOpenAt + this.conversationOpenIntervalMs - Date.now());
+    // Add a randomized human-like jitter delay of 5 to 15 seconds to deter Google's rate-limiting/bot detection
+    const jitterMs = Math.floor(Math.random() * 10000) + 5000;
+    const conversationWaitMs = baseWaitMs + jitterMs;
     if (conversationWaitMs > 0) {
       onStage?.("conversation_pacing");
       await page.waitForTimeout(conversationWaitMs);
@@ -1161,7 +1164,9 @@ class GoogleMessagesClient extends EventEmitter {
     const page = await this.ensurePage();
     const local = to.replace(/^\+98/, "0");
     // Most specific first: the exact "Send to <number>" row, then any suggestion
-    // row that contains the number (contact match), then the bare number text.
+    // row that contains the number (contact match), then scoped/option selectors.
+    // We avoid generic text=number selectors as they can pre-emptively match the
+    // currently-typed search input box or header chips instead of the dropdown options.
     const selectors = [
       `text=Send to ${to}`,
       `text=Send to ${local}`,
@@ -1169,8 +1174,14 @@ class GoogleMessagesClient extends EventEmitter {
       `[role='listitem']:has-text("${to}")`,
       `[role='option']:has-text("${local}")`,
       `mws-contact-selection-list :has-text("${to}")`,
-      `text=${to}`,
-      `text=${local}`
+      `mws-contact-selection-list :has-text("${local}")`,
+      `mws-contact-selection-list-item :has-text("${to}")`,
+      `mws-contact-selection-list-item :has-text("${local}")`,
+      `[role='option'] :has-text("Send to")`,
+      `[role='listitem'] :has-text("Send to")`,
+      `[role='option']`,
+      `[role='listitem']`,
+      `mws-contact-selection-list-item`
     ];
 
     let option;
