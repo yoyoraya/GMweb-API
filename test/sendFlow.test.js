@@ -427,3 +427,83 @@ test("session claim ignores a similarly named action without the Google prompt",
   assert.equal(claimed, false);
   assert.equal(clicks, 0);
 });
+
+test("google messages rate limit fallback scrolling mode triggers, scrolls, defers, and auto-exits after successes", async () => {
+  try { fs.unlinkSync("./data/test-conversation-cache.json"); } catch (e) {}
+  const c = client();
+  let scrolls = 0;
+  let clickedConversations = [];
+  let isWarmed = false;
+
+  const page = {
+    bringToFront: async () => {},
+    isClosed: () => false,
+    url: () => "https://messages.google.com/web/conversations",
+    waitForTimeout: async () => {},
+    locator: (sel) => ({
+      count: async () => 2,
+      first: () => ({
+        waitFor: async () => {},
+        scrollIntoViewIfNeeded: async () => {},
+        click: async () => { clickedConversations.push(sel); }
+      })
+    }),
+    evaluate: async (fn) => {
+      const str = String(fn || "");
+      if (str.includes("scrollTop")) {
+        scrolls += 1;
+      }
+    },
+    waitForFunction: async () => true,
+    goto: async () => {}
+  };
+
+  c.ensurePage = async () => page;
+  c.ensurePaired = async () => {};
+  c.clickLoadMoreConversations = async () => true;
+  c.composerReady = async () => true;
+  c.typeAndSend = async () => true;
+
+  // We have no cached conversation initialy
+  c.sidebarConversationIndex = new Map();
+  let listCalls = 0;
+  c.listConversationsUnlocked = async () => {
+    listCalls += 1;
+    if (listCalls === 1) return [];
+    return [
+      { id: "1", href: "/web/conversations/abc", title: "Target contact", text: "+989128904528", timestamp: "Jun 1" }
+    ];
+  };
+
+  // Enable rate limit fallback mode manually
+  c.googleRateLimitedMode = true;
+  c.consecutiveSuccessfulConversationSends = 0;
+
+  // 1. Send with rate limit scroll mode on -> should use scrollAndSearchSidebar and find/send
+  const res = await c.sendMessageUnlocked({ to: "+989128904528", text: "Test fallback mode" });
+  assert.equal(res.type, "sent");
+  assert.equal(c.googleRateLimitedMode, true);
+  assert.equal(c.consecutiveSuccessfulConversationSends, 1);
+  assert(scrolls > 0);
+
+  // 2. Perform more sends to hit 5 successes and automatically turn off googleRateLimitedMode
+  for (let i = 0; i < 4; i++) {
+    await c.sendMessageUnlocked({ to: "+989128904528", text: `Success ${i + 2}` });
+  }
+  assert.equal(c.googleRateLimitedMode, false);
+  assert.equal(c.consecutiveSuccessfulConversationSends, 0);
+
+  // 3. Fallback to startChatFlow rate limit check
+  c.startChatFlow = async () => {
+    // Mimic google rate limit display
+    return false;
+  };
+  c.conversationCreationRateLimited = async () => true;
+
+  await assert.rejects(
+    c.sendMessageUnlocked({ to: "+989000000000", text: "This will trigger rate limit" }),
+    (error) => error.code === "CONVERSATION_OPEN_DEFER"
+  );
+  assert.equal(c.googleRateLimitedMode, true);
+  assert.equal(c.consecutiveSuccessfulConversationSends, 0);
+});

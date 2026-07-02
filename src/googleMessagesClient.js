@@ -66,6 +66,9 @@ class GoogleMessagesClient extends EventEmitter {
     this.conversationHistoryMaxBatches = Math.max(1, Number(config.conversationHistoryMaxBatches) || 80);
     this.conversationIndexMaxBatches = Math.max(1, Number(config.conversationIndexMaxBatches) || 6);
     this.conversationIndexBudgetMs = Math.max(10000, Number(config.conversationIndexBudgetMs) || 45000);
+    // Rate limit fallback states for adaptive scrolling of sidebar
+    this.googleRateLimitedMode = false;
+    this.consecutiveSuccessfulConversationSends = 0;
   }
 
   async start() {
@@ -354,6 +357,27 @@ class GoogleMessagesClient extends EventEmitter {
     onStage?.("locating");
     if (await this.openExistingConversation(to)) return true;
 
+    // --- Google Rate Limited (Scroll) Fallback Mode ---
+    if (this.googleRateLimitedMode) {
+      onStage?.("sidebar_scroll_searching");
+      const match = await this.scrollAndSearchSidebar(to, 5);
+      if (match && match.href) {
+        const clicked = await this.clickConversationInSidebar(page, match.href);
+        if (clicked && await this.composerReady(6000)) {
+          this.cacheRecipientConversation(to, match.href);
+          return true;
+        }
+      }
+
+      // If we are in rate limited mode and can't find the conversation in the sidebar,
+      // we must NOT try starting a chat (to avoid worsening Google's restriction).
+      // Instead, we throw a CONVERSATION_OPEN_DEFER error to move this job down in the queue (by 10 positions).
+      const error = new Error(`Conversation for ${to} not found in sidebar scrolling search while rate limited.`);
+      error.code = "CONVERSATION_OPEN_DEFER";
+      error.statusCode = 503;
+      throw error;
+    }
+
     // 3. New number — Start-chat UI flow.
     const baseWaitMs = Math.max(0, this.lastConversationOpenAt + this.conversationOpenIntervalMs - Date.now());
     // Add a randomized human-like jitter delay of 5 to 15 seconds to deter Google's rate-limiting/bot detection
@@ -408,9 +432,17 @@ class GoogleMessagesClient extends EventEmitter {
         // Retrying immediately would create more conversations and extend the
         // restriction, so surface it to the queue on the first occurrence.
         if (error?.code === "GOOGLE_CONVERSATION_RATE_LIMIT") {
-          stage("google_rate_limited");
-          throw error;
+          this.googleRateLimitedMode = true;
+          this.consecutiveSuccessfulConversationSends = 0;
+          stage("entering_google_rate_limit_fallback_mode");
+
+          // Gracefully defer this job 10 spots down in the queue (standard server behavior)
+          const deferError = new Error("Google Messages rate-limited conversation creation. Switched to sidebar scrolling search mode.");
+          deferError.code = "CONVERSATION_OPEN_DEFER";
+          deferError.statusCode = 503;
+          throw deferError;
         }
+        throw error;
       }
 
       if (opened) {
@@ -419,7 +451,19 @@ class GoogleMessagesClient extends EventEmitter {
         if (attempt > 1 && await this.lastOutgoingMatches(text)) { stage("already_sent"); sent = true; break; }
         stage("typing");
         sent = await this.typeAndSend(text).catch(() => false);
-        if (sent) { stage("sent"); break; }
+        if (sent) { 
+          stage("sent"); 
+          // If we are in Google Rate Limited Mode, count consecutive successes
+          if (this.googleRateLimitedMode) {
+            this.consecutiveSuccessfulConversationSends += 1;
+            if (this.consecutiveSuccessfulConversationSends >= 5) {
+              this.googleRateLimitedMode = false;
+              this.consecutiveSuccessfulConversationSends = 0;
+              stage("exiting_google_rate_limit_fallback_mode");
+            }
+          }
+          break; 
+        }
         stage("send_unverified");
       }
 
@@ -988,6 +1032,51 @@ class GoogleMessagesClient extends EventEmitter {
 
     this.mergeSidebarConversationIndex(rows);
     return rows;
+  }
+
+  // Scroll and search the sidebar for existing conversation.
+  // maxScrolls limits how active we'll be, stopping immediately if any row
+  // has a timestamp before the current calendar year.
+  async scrollAndSearchSidebar(to, maxScrolls = 5) {
+    const page = await this.ensurePage();
+    let stalls = 0;
+
+    for (let scroll = 1; scroll <= maxScrolls; scroll++) {
+      const before = await page.locator("mws-conversation-list-item").count().catch(() => 0);
+
+      await page.evaluate(() => {
+        const scroller = document.querySelector("nav.conversation-list");
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }).catch(() => {});
+
+      await this.clickLoadMoreConversations(page).catch(() => {});
+
+      const grew = await page.waitForFunction(
+        (count) => document.querySelectorAll("mws-conversation-list-item").length > count,
+        before,
+        { timeout: 2500 }
+      ).then(() => true).catch(() => false);
+
+      const rows = await this.listConversationsUnlocked(100, { loadMore: false });
+      this.mergeSidebarConversationIndex(rows);
+
+      const match = rows.find((conversation) => this.conversationMatchesRecipient(conversation, to));
+      if (match) {
+        return match;
+      }
+
+      const reachedPreviousYear = rows.some((row) => this.timestampIsBeforeCurrentYear(row.timestamp));
+      if (reachedPreviousYear) {
+        break;
+      }
+
+      if (!grew && ++stalls >= 2) break;
+      if (grew) stalls = 0;
+    }
+
+    // Default to searching overall cache index
+    return [...this.sidebarConversationIndex.values()]
+      .find((conversation) => this.conversationMatchesRecipient(conversation, to)) || null;
   }
 
   async ensurePaired() {
