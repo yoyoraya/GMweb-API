@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowUp, X, RefreshCw, Pause, Play } from "lucide-react";
+import { ArrowUp, X, RefreshCw, Pause, Play, Moon } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import type { QueueCounts, QueueJob } from "@/lib/types";
+import type { QueueCounts, QueueJob, QueueQuietHours } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +22,7 @@ export function QueuePage() {
   const [jobs, setJobs] = useState<QueueJob[]>([]);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [paused, setPaused] = useState(false);
+  const [quietHours, setQuietHours] = useState<QueueQuietHours | null>(null);
   const [loading, setLoading] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
@@ -35,11 +36,12 @@ export function QueuePage() {
     setLoading(true);
     try {
       const [c, j] = await Promise.all([
-        api<{ counts: QueueCounts; paused: boolean }>("/admin/queue", { headers: { "Content-Type": "text/plain" } }),
+        api<{ counts: QueueCounts; paused: boolean; quietHours: QueueQuietHours }>("/admin/queue", { headers: { "Content-Type": "text/plain" } }),
         api<{ jobs: QueueJob[] }>("/admin/queue/jobs?limit=100", { headers: { "Content-Type": "text/plain" } }),
       ]);
       setCounts(c.counts);
       setPaused(c.paused);
+      setQuietHours(c.quietHours);
       setJobs(j.jobs);
       setStaleSince(null);
     } catch (err) {
@@ -135,6 +137,17 @@ export function QueuePage() {
             Not updating since {new Date(staleSince).toLocaleTimeString()} — session may have expired, try reloading the page.
           </div>
         )}
+        {quietHours?.active && (
+          <div className="flex items-start gap-3 rounded-lg border border-amber-400/35 bg-amber-400/10 px-3 py-2 text-amber-100">
+            <Moon className="mt-0.5 size-4 shrink-0 text-amber-300" />
+            <div>
+              <div className="text-sm font-medium">Quiet hours are active</div>
+              <div className="text-xs text-amber-100/75">
+                Normal SMS is held until {quietHours.releaseAt ? new Date(quietHours.releaseAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "08:00"} {quietHours.timeZone}. HIGH priority still sends immediately.
+              </div>
+            </div>
+          </div>
+        )}
       </CardHeader>
       <CardContent className="p-0">
         {jobs.length === 0 ? (
@@ -148,6 +161,7 @@ export function QueuePage() {
                     {job.state}
                   </Badge>
                   {job.priority === "high" && <Badge variant="warning">HIGH</Badge>}
+                  {job.quietHoursHeld && <Badge variant="warning">QUIET</Badge>}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">{job.to ?? "—"}</div>

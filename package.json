@@ -1,6 +1,6 @@
 {
   "name": "gmweb-api",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "private": true,
   "description": "GMweb API: OpenWA-style HTTP bridge for Google Messages for Web.",
   "main": "src/server.js",

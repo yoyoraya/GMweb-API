@@ -960,6 +960,22 @@ function parseLimit(value, fallback, max) {
   return Math.max(1, Math.min(parsed, max));
 }
 
+function currentQuietHours(now = new Date()) {
+  const gate = sendGate(now, {
+    highPriority: false,
+    timeZone: SEND_TIME_ZONE,
+    startHour: SEND_QUIET_START_HOUR,
+    endHour: SEND_QUIET_END_HOUR
+  });
+  return {
+    active: gate.blocked,
+    timeZone: SEND_TIME_ZONE,
+    startHour: SEND_QUIET_START_HOUR,
+    endHour: SEND_QUIET_END_HOUR,
+    releaseAt: gate.releaseAt?.toISOString() || null
+  };
+}
+
 const STAGE_LABELS = {
   pacing: "Waiting for send pacing",
   quiet_hours: "Quiet hours (02:00–08:00 Asia/Tehran)",
@@ -996,9 +1012,18 @@ function enrichQueueJob(job) {
     ? now - createdMs : Math.max(0, processedMs - createdMs);
   const stage = ledger?.stage || null;
   const stageForMs = stageMs ? Math.max(0, now - stageMs) : 0;
+  const quietHours = currentQuietHours(new Date(now));
+  const quietHoursHeld = quietHours.active && job.priority !== "high" &&
+    ["waiting", "paused", "delayed"].includes(job.state);
+  const visibleStage = quietHoursHeld ? "quiet_hours" : stage;
 
   let diagnosis = { code: "queued", severity: "info", message: "Waiting for its turn in the queue" };
-  if (job.state === "delayed") {
+  if (quietHoursHeld) {
+    diagnosis = {
+      code: "quiet_hours", severity: "info",
+      message: `Held by quiet hours until 08:00 ${SEND_TIME_ZONE}; HIGH priority can send immediately`
+    };
+  } else if (job.state === "delayed") {
     diagnosis = job.deferReason === "quiet_hours"
       ? { code: "quiet_hours", severity: "info", message: "Normal SMS paused until 08:00 Asia/Tehran; HIGH priority can send now" }
       : {
@@ -1017,13 +1042,14 @@ function enrichQueueJob(job) {
 
   return {
     ...job,
-    stage,
-    stageLabel: stage ? (STAGE_LABELS[stage] || stage) : null,
-    stageAt: stageMs ? new Date(stageMs).toISOString() : null,
+    stage: visibleStage,
+    stageLabel: visibleStage ? (STAGE_LABELS[visibleStage] || visibleStage) : null,
+    stageAt: quietHoursHeld ? null : (stageMs ? new Date(stageMs).toISOString() : null),
     ageMs: Math.max(0, now - createdMs),
     waitingForMs,
     activeForMs,
-    stageForMs,
+    stageForMs: quietHoursHeld ? 0 : stageForMs,
+    quietHoursHeld,
     tracking: ledger ? "sqlite" : "redis_only",
     diagnosis
   };
@@ -1955,6 +1981,16 @@ app.get("/admin/queue", {
         type: "object",
         properties: {
           paused: { type: "boolean" },
+          quietHours: {
+            type: "object",
+            properties: {
+              active: { type: "boolean" },
+              timeZone: { type: "string" },
+              startHour: { type: "integer" },
+              endHour: { type: "integer" },
+              releaseAt: { type: ["string", "null"] }
+            }
+          },
           counts: {
             type: "object",
             properties: {
@@ -1970,7 +2006,11 @@ app.get("/admin/queue", {
       }
     }
   }
-}, async () => ({ paused: await sendQueue.isPaused(), counts: await sendQueue.counts() }));
+}, async () => ({
+  paused: await sendQueue.isPaused(),
+  counts: await sendQueue.counts(),
+  quietHours: currentQuietHours()
+}));
 
 app.post("/admin/queue/pause", {
   schema: {
@@ -2103,6 +2143,7 @@ app.get("/admin/queue/jobs", {
                 finishedAt: { type: ["string", "null"] },
                 delayUntil: { type: ["string", "null"] },
                 deferReason: { type: ["string", "null"] },
+                quietHoursHeld: { type: "boolean" },
                 stage: { type: ["string", "null"] },
                 stageLabel: { type: ["string", "null"] },
                 stageAt: { type: ["string", "null"] },

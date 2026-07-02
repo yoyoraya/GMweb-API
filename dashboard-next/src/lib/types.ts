@@ -43,6 +43,14 @@ export interface QueueCounts {
   delayed: number;
 }
 
+export interface QueueQuietHours {
+  active: boolean;
+  timeZone: string;
+  startHour: number;
+  endHour: number;
+  releaseAt: string | null;
+}
+
 export interface QueueJob {
   id: string;
   state: string;
@@ -58,6 +66,7 @@ export interface QueueJob {
   finishedAt: string | null;
   delayUntil: string | null;
   deferReason: string | null;
+  quietHoursHeld: boolean;
   stage: string | null;
   stageLabel: string | null;
   stageAt: string | null;
