@@ -108,6 +108,12 @@ test("Tehran quiet hours block normal sends from 02:00 until 08:00", () => {
   const high = sendGate(new Date("2026-07-02T00:00:00.000Z"), { highPriority: true });
   assert.equal(high.blocked, false);
   assert.equal(high.bypassed, true);
+  const delayedHigh = sendGate(new Date("2026-07-02T00:00:00.000Z"), {
+    highPriority: true,
+    delayedRetry: true
+  });
+  assert.equal(delayedHigh.blocked, true);
+  assert.equal(delayedHigh.bypassed, false);
 });
 
 test("quiet-hour deferral creates a durable delayed normal job", async () => {
@@ -126,6 +132,31 @@ test("quiet-hour deferral creates a durable delayed normal job", async () => {
   }
   assert.equal(added.data.priority, "normal");
   assert.equal(added.data.deferReason, "quiet_hours");
+  assert.equal(added.opts.delay, 4.5 * 60 * 60 * 1000);
+});
+
+test("quiet-hour deferral preserves HIGH while delaying its retry", async () => {
+  const q = Object.create(SendQueue.prototype);
+  let added;
+  q.enqueue = async (data, opts) => {
+    added = { data, opts };
+    return { id: "next-high", data, opts };
+  };
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-02T00:00:00.000Z");
+  try {
+    await q.deferUntil(
+      { to: "1", text: "retry", priority: "high" },
+      new Date("2026-07-02T04:30:00.000Z"),
+      "quiet_hours",
+      { highPriority: true }
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(added.data.priority, "high");
+  assert.equal(added.data.deferReason, "quiet_hours");
+  assert.equal(added.opts.lifo, true);
   assert.equal(added.opts.delay, 4.5 * 60 * 60 * 1000);
 });
 

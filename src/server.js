@@ -549,18 +549,26 @@ function isHighPriorityJob(job) {
   return job?.data?.priority === "high" || Boolean(job?.opts?.lifo);
 }
 
+function isDelayedRetryJob(job) {
+  return Number(job?.attemptsMade || 0) > 0 ||
+    Number(job?.opts?.delay || job?.delay || 0) > 0 ||
+    Number(job?.data?.deferCount || 0) > 0 ||
+    Boolean(job?.data?.deferReason);
+}
+
 async function deferQuietHoursJob(job, releaseAt) {
+  const high = isHighPriorityJob(job);
   const ledger = sendStore.byJob(job.id);
   const data = {
     ...job.data,
-    priority: "normal",
+    priority: high ? "high" : "normal",
     _ledgerId: ledger?.id || job.data?._ledgerId || null
   };
   const releaseIso = releaseAt.toISOString();
   sendStore.markStatus(job.id, "queued", { attempts: job.attemptsMade || 0 });
   sendStore.markStage(job.id, "quiet_hours");
 
-  const deferredJob = await sendQueue.deferUntil(data, releaseAt, "quiet_hours");
+  const deferredJob = await sendQueue.deferUntil(data, releaseAt, "quiet_hours", { highPriority: high });
   if (data._ledgerId) sendStore.attachJob(data._ledgerId, deferredJob.id);
   if (data._idempotencyKey && data._bodyHash) {
     await sendQueue.setIdempotencyJob(data._idempotencyKey, deferredJob.id, data._bodyHash).catch(() => {});
@@ -572,7 +580,7 @@ async function deferQuietHoursJob(job, releaseAt) {
     jobId: job.id,
     deferredJobId: deferredJob.id,
     to: job.data?.to,
-    priority: "normal",
+    priority: high ? "high" : "normal",
     timeZone: SEND_TIME_ZONE,
     releaseAt: releaseIso,
     at: new Date().toISOString()
@@ -647,6 +655,7 @@ function startSendWorker() {
       // Runs in-process; shares the single Playwright browser via withBrowserLock.
       const schedule = sendGate(new Date(), {
         highPriority: isHighPriorityJob(job),
+        delayedRetry: isDelayedRetryJob(job),
         timeZone: SEND_TIME_ZONE,
         startHour: SEND_QUIET_START_HOUR,
         endHour: SEND_QUIET_END_HOUR
@@ -1013,7 +1022,8 @@ function enrichQueueJob(job) {
   const stage = ledger?.stage || null;
   const stageForMs = stageMs ? Math.max(0, now - stageMs) : 0;
   const quietHours = currentQuietHours(new Date(now));
-  const quietHoursHeld = quietHours.active && job.priority !== "high" &&
+  const quietHoursHeld = quietHours.active &&
+    (job.priority !== "high" || job.state === "delayed") &&
     ["waiting", "paused", "delayed"].includes(job.state);
   const visibleStage = quietHoursHeld ? "quiet_hours" : stage;
 
@@ -1021,7 +1031,9 @@ function enrichQueueJob(job) {
   if (quietHoursHeld) {
     diagnosis = {
       code: "quiet_hours", severity: "info",
-      message: `Held by quiet hours until 08:00 ${SEND_TIME_ZONE}; HIGH priority can send immediately`
+      message: job.priority === "high"
+        ? `Delayed HIGH retry held by quiet hours until 08:00 ${SEND_TIME_ZONE}`
+        : `Held by quiet hours until 08:00 ${SEND_TIME_ZONE}; only fresh HIGH messages can send now`
     };
   } else if (job.state === "delayed") {
     diagnosis = job.deferReason === "quiet_hours"
@@ -1699,7 +1711,8 @@ app.post("/send", {
       "renewal confirmation) so they aren't stuck behind a bulk reminder campaign.",
       "",
       "**Quiet hours:** normal-priority messages are held from 02:00 through 07:59",
-      "`Asia/Tehran` and released at 08:00. High-priority messages bypass quiet hours.",
+      "`Asia/Tehran` and released at 08:00. Delayed retries are also held even when",
+      "HIGH; only a fresh high-priority first attempt bypasses quiet hours.",
       "",
       "**Rate limits (project keys):** configurable per-minute and per-hour (default 10/min, 100/hr).",
       "",
@@ -1717,7 +1730,7 @@ app.post("/send", {
         wait: { type: "boolean", default: false, description: "If true, block until the send completes (max 90s) and return the result." },
         priority: {
           type: ["string", "integer"],
-          description: "Send priority. Use `\"high\"` to jump the queue and bypass the 02:00–08:00 Asia/Tehran quiet-hours hold; omit or use `\"normal\"` for FIFO. A numeric 1-10 is also accepted (1-3 = high)."
+          description: "Send priority. A fresh `\"high\"` first attempt jumps the queue and bypasses the 02:00–08:00 Asia/Tehran hold. Once delayed/retrying, every job is held until 08:00 even if HIGH. Omit or use `\"normal\"` for FIFO. A numeric 1-10 is also accepted (1-3 = high)."
         }
       },
       examples: [{ to: "+989121234567", text: "Hello from GMweb API!", priority: "high" }]

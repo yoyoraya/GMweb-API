@@ -41,15 +41,15 @@ class SendQueue {
     });
   }
 
-  deferUntil(data, releaseAt, reason = "scheduled") {
+  deferUntil(data, releaseAt, reason = "scheduled", { highPriority = false } = {}) {
     const releaseMs = releaseAt instanceof Date ? releaseAt.getTime() : Number(releaseAt);
     const delay = Math.max(1000, releaseMs - Date.now());
     return this.enqueue({
       ...data,
-      priority: "normal",
+      priority: highPriority ? "high" : "normal",
       deferReason: reason,
       deferCount: Number(data?.deferCount || 0) + 1
-    }, { delay });
+    }, { delay, ...(highPriority ? { lifo: true } : {}) });
   }
 
   async deferHigh(data, successes = 10) {

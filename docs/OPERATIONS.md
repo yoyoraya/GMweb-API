@@ -4,7 +4,8 @@
 
 Installers set the Linux server timezone to `Asia/Tehran`. The send worker also
 uses that timezone explicitly: normal-priority SMS jobs are durably delayed from
-02:00 through 07:59 and released at 08:00. HIGH-priority jobs bypass this rule.
+02:00 through 07:59 and released at 08:00. Only fresh HIGH first attempts bypass
+this rule; delayed/retrying jobs are held until 08:00 even when HIGH.
 The defaults can be changed with `SEND_TIMEZONE`, `SEND_QUIET_START_HOUR`, and
 `SEND_QUIET_END_HOUR`.
 

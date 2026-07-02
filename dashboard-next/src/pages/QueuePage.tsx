@@ -143,7 +143,7 @@ export function QueuePage() {
             <div>
               <div className="text-sm font-medium">Quiet hours are active</div>
               <div className="text-xs text-amber-100/75">
-                Normal SMS is held until {quietHours.releaseAt ? new Date(quietHours.releaseAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "08:00"} {quietHours.timeZone}. HIGH priority still sends immediately.
+                Normal SMS and every delayed retry—including HIGH—are held until {quietHours.releaseAt ? new Date(quietHours.releaseAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "08:00"} {quietHours.timeZone}. Only fresh HIGH messages send immediately.
               </div>
             </div>
           </div>
@@ -178,7 +178,9 @@ export function QueuePage() {
                     <span>in queue: {elapsed(job.waitingForMs)}</span>
                     {job.state === "active" && <span>active: {elapsed(job.activeForMs)}</span>}
                     {job.stageLabel && <span>stage: {job.stageLabel} ({elapsed(job.stageForMs)})</span>}
-                    {job.state === "delayed" && job.delayUntil && (
+                    {job.quietHoursHeld && quietHours?.releaseAt ? (
+                      <span>scheduled: {new Date(quietHours.releaseAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                    ) : job.state === "delayed" && job.delayUntil && (
                       <span>{job.deferReason === "quiet_hours" ? "scheduled" : "retry"}: {new Date(job.delayUntil).toLocaleTimeString()}</span>
                     )}
                   </div>

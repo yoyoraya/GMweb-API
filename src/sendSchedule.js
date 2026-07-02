@@ -30,7 +30,10 @@ function sendSchedule(now = new Date(), options = {}) {
 }
 
 function sendGate(now = new Date(), options = {}) {
-  if (options.highPriority) {
+  // A fresh HIGH message may bypass quiet hours. Once a job has entered a
+  // delayed/retry state it is no longer an emergency first attempt and must
+  // wait until the quiet window ends, even when its priority remains HIGH.
+  if (options.highPriority && !options.delayedRetry) {
     return {
       blocked: false,
       bypassed: true,
