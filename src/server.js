@@ -604,7 +604,7 @@ async function deferConversationJob(job, error) {
 
   const deferred = high
     ? await sendQueue.deferHigh(data, 10)
-    : { job: await sendQueue.deferNormal(data), releaseAt: null };
+    : await sendQueue.deferNormal(data, 10);
   if (data._ledgerId) sendStore.attachJob(data._ledgerId, deferred.job.id);
   if (data._idempotencyKey && data._bodyHash) {
     await sendQueue.setIdempotencyJob(data._idempotencyKey, deferred.job.id, data._bodyHash).catch(() => {});
@@ -616,7 +616,7 @@ async function deferConversationJob(job, error) {
     deferredJobId: deferred.job.id,
     to: job.data?.to,
     priority: high ? "high" : "normal",
-    releaseAfterSuccesses: high ? 10 : 0,
+    releaseAfterSuccesses: 10,
     at: new Date().toISOString()
   };
   emitSse(event);
@@ -737,7 +737,23 @@ function startSendWorker() {
         // Auto-recover the browser after repeated failures (likely a wedged
         // page). Reconnects and loads a fresh Messages page without killing
         // the external Chrome. Only counts terminal failures (no more retries).
-        if (!willRetry) sendFailStreak += 1;
+        if (!willRetry) {
+          sendFailStreak += 1;
+
+          sendQueue.recordSuccessAndReleaseHigh()
+            .then((release) => {
+              if (release.released) {
+                emitSse({
+                  type: "send_deferred_released",
+                  jobId: release.released.id,
+                  to: release.released.data?.to,
+                  successSequence: release.sequence,
+                  at: new Date().toISOString()
+                });
+              }
+            })
+            .catch((error) => app.log.warn({ error }, "failed send deferred release bookkeeping failed"));
+        }
         if (sendFailStreak >= SEND_FAIL_RESTART_THRESHOLD && !recovering) {
           recovering = true;
           sendFailStreak = 0;
@@ -2156,6 +2172,7 @@ app.get("/admin/queue/jobs", {
                 finishedAt: { type: ["string", "null"] },
                 delayUntil: { type: ["string", "null"] },
                 deferReason: { type: ["string", "null"] },
+                deferCount: { type: "integer" },
                 quietHoursHeld: { type: "boolean" },
                 stage: { type: ["string", "null"] },
                 stageLabel: { type: ["string", "null"] },
@@ -2186,10 +2203,42 @@ app.get("/admin/queue/jobs", {
   return { jobs: jobs.map(enrichQueueJob) };
 });
 
+app.post("/admin/queue/release-delayed-high", {
+  schema: {
+    summary: "Release all deferred high-priority jobs",
+    description: "Moves every HIGH send that was previously delayed to the front of the queue for immediate processing. Preserves oldest-first order within the released batch. **Master token only.**",
+    tags: ["Admin"],
+    response: {
+      200: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          released: { type: "integer" }
+        }
+      }
+    }
+  }
+}, async () => {
+  const results = await sendQueue.releaseDeferredHighJobs();
+  for (const result of results) {
+    const ledger = sendStore.byJob(result.previousId);
+    if (ledger) sendStore.attachJob(ledger.id, result.id);
+    if (result._data?._idempotencyKey && result._data?._bodyHash) {
+      await sendQueue.setIdempotencyJob(result._data._idempotencyKey, result.id, result._data._bodyHash).catch(() => {});
+    }
+  }
+  emitSse({
+    type: "queue_delayed_high_released",
+    count: results.length,
+    at: new Date().toISOString()
+  });
+  return { ok: true, released: results.length };
+});
+
 app.post("/admin/queue/jobs/:id/promote", {
   schema: {
-    summary: "Bump a job to high priority",
-    description: "Moves a waiting/delayed send job to the front of the queue so it is processed next, ahead of all other waiting messages. **Master token only.**",
+    summary: "Send a queued job first",
+    description: "Moves any waiting/delayed send job—normal or HIGH—to the very front for immediate processing, ahead of all other waiting messages. Clears its current delay. **Master token only.**",
     tags: ["Admin"],
     params: { type: "object", properties: { id: { type: "string" } } }
   }

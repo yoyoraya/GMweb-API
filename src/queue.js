@@ -33,12 +33,20 @@ class SendQueue {
     return this.queue.add("send", data, opts);
   }
 
-  deferNormal(data) {
-    return this.enqueue({
+  async deferNormal(data, successes = 10) {
+    const client = await this._redis();
+    const sequence = Number(await client.get(SUCCESS_SEQUENCE_KEY)) || 0;
+    const job = await this.enqueue({
       ...data,
       priority: "normal",
       deferCount: Number(data?.deferCount || 0) + 1
+    }, {
+      // Keep a real BullMQ job so the ledger and dashboard remain durable.
+      delay: HIGH_DEFER_DELAY_MS
     });
+    const releaseAt = sequence + Math.max(1, Number(successes) || 10);
+    await client.zadd(DEFERRED_HIGH_KEY, releaseAt, String(job.id));
+    return { job, releaseAt };
   }
 
   deferUntil(data, releaseAt, reason = "scheduled", { highPriority = false } = {}) {
@@ -73,17 +81,51 @@ class SendQueue {
   async recordSuccessAndReleaseHigh() {
     const client = await this._redis();
     const sequence = Number(await client.incr(SUCCESS_SEQUENCE_KEY));
-    // Release at most one due high-priority retry per successful send so a
-    // group of deferred highs cannot form a new burst.
-    const due = await client.zrangebyscore(DEFERRED_HIGH_KEY, "-inf", sequence, "LIMIT", 0, 1);
-    if (!due.length) return { sequence, released: null };
-    const id = String(due[0]);
-    const job = await this.queue.getJob(id);
-    if (job && await job.getState().catch(() => "") === "delayed") {
-      await job.promote();
+
+    // Check if there are any waiting jobs left.
+    // BullMQ moves waiting jobs into its `paused` bucket while a queue is paused.
+    // They are still pending sends, so we check both waiting and paused.
+    const counts = await this.queue.getJobCounts("waiting", "paused");
+    const waitingCount = (counts.waiting || 0) + (counts.paused || 0);
+
+    let due;
+    if (waitingCount === 0) {
+      // If there are no waiting jobs, we release ALL deferred jobs because otherwise
+      // they would be stuck forever waiting for a sequence increment that will never come!
+      due = await client.zrange(DEFERRED_HIGH_KEY, 0, -1);
+    } else {
+      // Release at most one due deferred retry per progress step so a
+      // group of deferred highs cannot form a new burst.
+      due = await client.zrangebyscore(DEFERRED_HIGH_KEY, "-inf", sequence, "LIMIT", 0, 1);
     }
-    await client.zrem(DEFERRED_HIGH_KEY, id);
-    return { sequence, released: job || null };
+
+    if (!due.length) return { sequence, released: null };
+
+    let promotedJob = null;
+    for (const id of due) {
+      try {
+        const job = await this.queue.getJob(id);
+        if (job) {
+          const state = await job.getState().catch(() => "");
+          if (state === "delayed") {
+            await job.promote();
+          }
+          if (!promotedJob) {
+            promotedJob = job;
+          }
+        }
+      } catch (err) {
+        // Safe catch
+      }
+      await client.zrem(DEFERRED_HIGH_KEY, id);
+
+      // If there are waiting jobs, we only release one/first.
+      if (waitingCount > 0) {
+        break;
+      }
+    }
+
+    return { sequence, released: promotedJob || null };
   }
 
   async forgetDeferredHigh(id) {
@@ -260,10 +302,62 @@ class SendQueue {
       return { promoted: false, reason: `job is ${state}`, state };
     }
     const data = { ...job.data, priority: "high" };
+    // An explicit admin promotion means "send this next", even when the job
+    // was previously delayed or is currently inside quiet hours.
+    delete data.deferCount;
+    delete data.deferReason;
     await this.forgetDeferredHigh(id);
     await job.remove();
     const fresh = await this.queue.add("send", data, { lifo: true });
     return { promoted: true, id: fresh.id, previousId: String(id), state: "waiting", _data: data };
+  }
+
+  // Release every HIGH job that has previously been deferred. The queue is
+  // paused while jobs are reinserted so the worker cannot consume a partially
+  // reordered batch. Reinsert newest-first: with BullMQ LIFO this leaves the
+  // oldest deferred HIGH at the very front and preserves FIFO within the batch.
+  async releaseDeferredHighJobs() {
+    const wasPaused = await this.isPaused();
+    if (!wasPaused) await this.pause();
+
+    const released = [];
+    try {
+      const jobs = await this.queue.getJobs(["waiting", "paused", "delayed"], 0, -1, false);
+      const candidates = [];
+      for (const job of jobs) {
+        if (!job) continue;
+        const state = await job.getState().catch(() => "unknown");
+        const high = job.data?.priority === "high" || Boolean(job.opts?.lifo);
+        const wasDeferred = state === "delayed" ||
+          Number(job.data?.deferCount || 0) > 0 ||
+          Boolean(job.data?.deferReason);
+        if (high && wasDeferred && ["waiting", "paused", "delayed"].includes(state)) {
+          candidates.push({ job, state });
+        }
+      }
+
+      candidates.sort((a, b) => Number(b.job.timestamp || 0) - Number(a.job.timestamp || 0));
+      for (const { job } of candidates) {
+        const data = { ...job.data, priority: "high" };
+        // This admin action explicitly makes the next attempt immediate. Clear
+        // deferral markers so quiet-hours logic treats it like a fresh HIGH;
+        // a later failed attempt is still detected through attemptsMade.
+        delete data.deferCount;
+        delete data.deferReason;
+        await this.forgetDeferredHigh(job.id);
+        await job.remove();
+        const fresh = await this.queue.add("send", data, { lifo: true });
+        released.push({
+          id: fresh.id,
+          previousId: String(job.id),
+          _data: data
+        });
+      }
+    } finally {
+      if (!wasPaused) await this.resume();
+    }
+
+    return released;
   }
 
   // Remove a job from the queue (cancel a pending send).

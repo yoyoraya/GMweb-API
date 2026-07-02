@@ -87,11 +87,11 @@ test("normal misses go to the queue tail and high misses wait ten successes", as
 
   const normal = await q.deferNormal({ to: "1", text: "n" });
   const high = await q.deferHigh({ to: "2", text: "h" }, 10);
-  assert.equal(normal.opts.lifo, undefined);
-  assert.equal(normal.data.priority, "normal");
+  assert.equal(normal.job.opts.lifo, undefined);
+  assert.equal(normal.job.data.priority, "normal");
   assert.equal(high.job.opts.lifo, true);
   assert(high.job.opts.delay > 300 * 24 * 60 * 60 * 1000);
-  assert.deepEqual(zadds[0], ["gmweb-send:deferred-high", 17, high.job.id]);
+  assert.deepEqual(zadds[1], ["gmweb-send:deferred-high", 17, high.job.id]);
 });
 
 test("Tehran quiet hours block normal sends from 02:00 until 08:00", () => {
@@ -158,6 +158,77 @@ test("quiet-hour deferral preserves HIGH while delaying its retry", async () => 
   assert.equal(added.data.deferReason, "quiet_hours");
   assert.equal(added.opts.lifo, true);
   assert.equal(added.opts.delay, 4.5 * 60 * 60 * 1000);
+});
+
+test("bulk release moves only deferred HIGH jobs to the front, oldest first", async () => {
+  const q = Object.create(SendQueue.prototype);
+  const added = [];
+  const removed = [];
+  const forgotten = [];
+  let paused = false;
+  const makeJob = ({ id, timestamp, priority, state, deferCount = 0 }) => ({
+    id, timestamp,
+    data: { to: id, priority, deferCount },
+    opts: {},
+    getState: async () => state,
+    remove: async () => { removed.push(id); }
+  });
+  const jobs = [
+    makeJob({ id: "old-high", timestamp: 100, priority: "high", state: "delayed", deferCount: 1 }),
+    makeJob({ id: "new-high", timestamp: 200, priority: "high", state: "waiting", deferCount: 1 }),
+    makeJob({ id: "fresh-high", timestamp: 300, priority: "high", state: "waiting" }),
+    makeJob({ id: "normal", timestamp: 400, priority: "normal", state: "delayed", deferCount: 1 })
+  ];
+  q.queue = {
+    getJobs: async () => jobs,
+    add: async (_name, data, opts) => {
+      added.push({ data, opts });
+      return { id: `released-${added.length}` };
+    }
+  };
+  q.isPaused = async () => paused;
+  q.pause = async () => { paused = true; };
+  q.resume = async () => { paused = false; };
+  q.forgetDeferredHigh = async (id) => { forgotten.push(String(id)); };
+
+  const released = await q.releaseDeferredHighJobs();
+  assert.deepEqual(removed, ["new-high", "old-high"]);
+  assert.deepEqual(forgotten, ["new-high", "old-high"]);
+  assert.deepEqual(added.map((entry) => entry.data.to), ["new-high", "old-high"]);
+  assert.equal(added.every((entry) => entry.opts.lifo === true), true);
+  assert.equal("deferCount" in added[0].data, false);
+  assert.deepEqual(released.map((entry) => entry.previousId), ["new-high", "old-high"]);
+  assert.equal(paused, false);
+});
+
+test("single-job promotion clears delay markers and works for normal jobs", async () => {
+  const q = Object.create(SendQueue.prototype);
+  const forgotten = [];
+  let removed = false;
+  let added;
+  q.queue = {
+    getJob: async () => ({
+      id: "normal-delayed",
+      data: { to: "1", priority: "normal", deferCount: 2, deferReason: "quiet_hours" },
+      getState: async () => "delayed",
+      remove: async () => { removed = true; }
+    }),
+    add: async (_name, data, opts) => {
+      added = { data, opts };
+      return { id: "promoted" };
+    }
+  };
+  q.forgetDeferredHigh = async (id) => { forgotten.push(String(id)); };
+
+  const result = await q.promoteJob("normal-delayed");
+  assert.equal(result.promoted, true);
+  assert.equal(result.id, "promoted");
+  assert.equal(removed, true);
+  assert.deepEqual(forgotten, ["normal-delayed"]);
+  assert.equal(added.data.priority, "high");
+  assert.equal("deferCount" in added.data, false);
+  assert.equal("deferReason" in added.data, false);
+  assert.equal(added.opts.lifo, true);
 });
 
 test("previous-year timestamps stop sidebar warm-up", () => {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowUp, X, RefreshCw, Pause, Play, Moon } from "lucide-react";
+import { ArrowUp, X, RefreshCw, Pause, Play, Moon, Rocket } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { QueueCounts, QueueJob, QueueQuietHours } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -74,7 +74,7 @@ export function QueuePage() {
       await api(`/admin/queue/jobs/${id}/promote`, { method: "POST" });
       await load();
     } catch (err) {
-      setActionError(`Couldn't promote: ${messageFor(err)}`);
+      setActionError(`Couldn't send first: ${messageFor(err)}`);
     } finally {
       setBusyAction(null);
     }
@@ -112,6 +112,27 @@ export function QueuePage() {
     }
   }
 
+  async function releaseDelayedHigh() {
+    if (busyAction) return;
+    setBusyAction("release-high");
+    setActionError("");
+    try {
+      const result = await api<{ released: number }>("/admin/queue/release-delayed-high", { method: "POST" });
+      if (result.released === 0) setActionError("No delayed HIGH messages were found.");
+      await load();
+    } catch (err) {
+      setActionError(`Couldn't release delayed HIGH messages: ${messageFor(err)}`);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  const delayedHighCount = jobs.filter((job) =>
+    job.priority === "high" &&
+    job.state !== "active" &&
+    (job.state === "delayed" || job.deferCount > 0 || Boolean(job.deferReason))
+  ).length;
+
   return (
     <Card>
       <CardHeader>
@@ -123,6 +144,15 @@ export function QueuePage() {
             </span>
           )}
           <Badge variant={paused ? "warning" : "secondary"}>{paused ? "PAUSED" : "RUNNING"}</Badge>
+          <Button
+            size="sm"
+            onClick={releaseDelayedHigh}
+            disabled={delayedHighCount === 0 || busyAction !== null}
+            title="Move all delayed HIGH messages to the front and send them now"
+          >
+            <Rocket className="size-4" />
+            {busyAction === "release-high" ? "Releasing…" : `Send delayed HIGH now (${delayedHighCount})`}
+          </Button>
           <Button variant="secondary" size="sm" onClick={togglePaused} disabled={busyAction !== null}>
             {paused ? <Play className="size-4" /> : <Pause className="size-4" />}
             {busyAction === "toggle" ? "Working…" : paused ? "Resume paced" : "Pause"}
@@ -201,10 +231,11 @@ export function QueuePage() {
                     variant="secondary"
                     size="sm"
                     onClick={() => promote(job.id)}
-                    disabled={job.priority === "high" || job.state === "active" || busyAction !== null}
-                    title="Process next"
+                    disabled={job.state === "active" || busyAction !== null}
+                    title="Clear any delay and send this message first"
                   >
-                    <ArrowUp className="size-4" /> High
+                    <ArrowUp className="size-4" />
+                    {busyAction === `promote:${job.id}` ? "Moving…" : "Send first"}
                   </Button>
                   <Button
                     variant="ghost"
