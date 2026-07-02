@@ -201,6 +201,53 @@ test("bulk release moves only deferred HIGH jobs to the front, oldest first", as
   assert.equal(paused, false);
 });
 
+test("queue dashboard lists jobs in worker processing order", async () => {
+  const q = Object.create(SendQueue.prototype);
+  const calls = [];
+  const makeJob = (id, state) => ({
+    id,
+    data: { to: id, text: id, priority: "normal" },
+    opts: { attempts: 3 },
+    getState: async () => state
+  });
+  const byState = {
+    active: [makeJob("active", "active")],
+    waiting: [makeJob("promoted-high", "waiting"), makeJob("normal-next", "waiting")],
+    paused: [],
+    delayed: [makeJob("delayed", "delayed")]
+  };
+  q.queue = {
+    getJobs: async ([state], start, end, asc) => {
+      calls.push({ state, start, end, asc });
+      return byState[state].slice(start, end + 1);
+    }
+  };
+
+  const jobs = await q.listJobs({ limit: 3 });
+  assert.deepEqual(jobs.map((job) => job.id), ["active", "promoted-high", "normal-next"]);
+  assert.equal(calls.every((call) => call.asc === true), true);
+  assert.deepEqual(calls.map((call) => call.state), ["active", "waiting"]);
+});
+
+test("deferred HIGH count scans the complete pending queue", async () => {
+  const q = Object.create(SendQueue.prototype);
+  const makeJob = ({ priority, state, deferCount = 0, lifo = false }) => ({
+    data: { priority, deferCount },
+    opts: { lifo },
+    getState: async () => state
+  });
+  q.queue = {
+    getJobs: async () => [
+      ...Array.from({ length: 100 }, () => makeJob({ priority: "normal", state: "waiting" })),
+      makeJob({ priority: "high", state: "delayed", deferCount: 1 }),
+      makeJob({ priority: "high", state: "waiting", deferCount: 2 }),
+      makeJob({ priority: "high", state: "waiting" })
+    ]
+  };
+
+  assert.equal(await q.countDeferredHighJobs(), 2);
+});
+
 test("single-job promotion clears delay markers and works for normal jobs", async () => {
   const q = Object.create(SendQueue.prototype);
   const forgotten = [];

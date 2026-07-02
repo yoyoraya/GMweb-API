@@ -1627,7 +1627,7 @@
         "tags": [
           "Admin"
         ],
-        "description": "Returns pending send jobs (active, waiting, delayed) newest-first, with a text preview and priority. Use to drive a queue panel. **Master token only.**",
+        "description": "Returns pending send jobs in actual processing order (active first, then next-to-run), with a text preview and priority. `delayedHighCount` covers the complete queue even when the visible list is limited. **Master token only.**",
         "parameters": [
           {
             "schema": {
@@ -1724,6 +1724,9 @@
                               "string"
                             ]
                           },
+                          "deferCount": {
+                            "type": "integer"
+                          },
                           "quietHoursHeld": {
                             "type": "boolean"
                           },
@@ -1785,6 +1788,41 @@
                           }
                         }
                       }
+                    },
+                    "delayedHighCount": {
+                      "type": "integer"
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/queue/release-delayed-high": {
+      "post": {
+        "summary": "Release all deferred high-priority jobs",
+        "tags": [
+          "Admin"
+        ],
+        "description": "Moves every HIGH send that was previously delayed to the front of the queue for immediate processing. Preserves oldest-first order within the released batch. **Master token only.**",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "released": {
+                      "type": "integer"
                     }
                   }
                 }
@@ -1796,11 +1834,11 @@
     },
     "/admin/queue/jobs/{id}/promote": {
       "post": {
-        "summary": "Bump a job to high priority",
+        "summary": "Send a queued job first",
         "tags": [
           "Admin"
         ],
-        "description": "Moves a waiting/delayed send job to the front of the queue so it is processed next, ahead of all other waiting messages. **Master token only.**",
+        "description": "Moves any waiting/delayed send job—normal or HIGH—to the very front for immediate processing, ahead of all other waiting messages. Clears its current delay. **Master token only.**",
         "parameters": [
           {
             "schema": {

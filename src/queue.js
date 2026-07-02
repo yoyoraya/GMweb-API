@@ -237,10 +237,20 @@ class SendQueue {
     return this.queue.isPaused();
   }
 
-  // List jobs (newest first) for the dashboard queue panel. Returns a light
-  // shape — no full message body, just a preview.
+  // List jobs in actual processing order for the dashboard queue panel:
+  // active first, then the jobs the worker will pop next, then delayed jobs.
+  // BullMQ's wait list is consumed from the tail, so asc=true is essential;
+  // newest-first hides LIFO/admin-promoted jobs at the bottom of long queues.
+  // Returns a light shape — no full message body, just a preview.
   async listJobs({ states = ["active", "waiting", "paused", "delayed"], limit = 100 } = {}) {
-    const jobs = await this.queue.getJobs(states, 0, Math.max(0, limit - 1), false);
+    const jobs = [];
+    let remaining = Math.max(0, limit);
+    for (const state of states) {
+      if (remaining === 0) break;
+      const stateJobs = await this.queue.getJobs([state], 0, remaining - 1, true);
+      jobs.push(...stateJobs);
+      remaining -= stateJobs.length;
+    }
     const out = [];
     for (const job of jobs) {
       if (!job) continue;
@@ -264,6 +274,25 @@ class SendQueue {
       });
     }
     return out;
+  }
+
+  // Count across the complete pending queue, not just the dashboard's visible
+  // page. A queue may have hundreds of waiting jobs before its deferred HIGH
+  // entries, and deriving this count from the first 100 makes the release
+  // button incorrectly show zero and become disabled.
+  async countDeferredHighJobs() {
+    const jobs = await this.queue.getJobs(["waiting", "paused", "delayed"], 0, -1, false);
+    let count = 0;
+    for (const job of jobs) {
+      if (!job) continue;
+      const state = await job.getState().catch(() => "unknown");
+      const high = job.data?.priority === "high" || Boolean(job.opts?.lifo);
+      const deferred = state === "delayed" ||
+        Number(job.data?.deferCount || 0) > 0 ||
+        Boolean(job.data?.deferReason);
+      if (high && state !== "active" && deferred) count += 1;
+    }
+    return count;
   }
 
   // Internal-only full payloads used to migrate pre-ledger Redis backlog into

@@ -2141,7 +2141,7 @@ app.get("/admin/sends", {
 app.get("/admin/queue/jobs", {
   schema: {
     summary: "List queued send jobs",
-    description: "Returns pending send jobs (active, waiting, delayed) newest-first, with a text preview and priority. Use to drive a queue panel. **Master token only.**",
+    description: "Returns pending send jobs in actual processing order (active first, then next-to-run), with a text preview and priority. `delayedHighCount` covers the complete queue even when the visible list is limited. **Master token only.**",
     tags: ["Admin"],
     querystring: {
       type: "object",
@@ -2192,15 +2192,23 @@ app.get("/admin/queue/jobs", {
                 }
               }
             }
-          }
+          },
+          delayedHighCount: { type: "integer" },
+          total: { type: "integer" }
         }
       }
     }
   }
 }, async (request) => {
   const limit = parseLimit(request.query.limit, 100, 500);
-  const jobs = await sendQueue.listJobs({ limit });
-  return { jobs: jobs.map(enrichQueueJob) };
+  const [jobs, delayedHighCount, counts] = await Promise.all([
+    sendQueue.listJobs({ limit }),
+    sendQueue.countDeferredHighJobs(),
+    sendQueue.counts()
+  ]);
+  const total = (counts.active || 0) + (counts.waiting || 0) +
+    (counts.paused || 0) + (counts.delayed || 0);
+  return { jobs: jobs.map(enrichQueueJob), delayedHighCount, total };
 });
 
 app.post("/admin/queue/release-delayed-high", {

@@ -23,6 +23,7 @@ export function QueuePage() {
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [paused, setPaused] = useState(false);
   const [quietHours, setQuietHours] = useState<QueueQuietHours | null>(null);
+  const [delayedHighCount, setDelayedHighCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
@@ -37,12 +38,13 @@ export function QueuePage() {
     try {
       const [c, j] = await Promise.all([
         api<{ counts: QueueCounts; paused: boolean; quietHours: QueueQuietHours }>("/admin/queue", { headers: { "Content-Type": "text/plain" } }),
-        api<{ jobs: QueueJob[] }>("/admin/queue/jobs?limit=100", { headers: { "Content-Type": "text/plain" } }),
+        api<{ jobs: QueueJob[]; delayedHighCount: number }>("/admin/queue/jobs?limit=100", { headers: { "Content-Type": "text/plain" } }),
       ]);
       setCounts(c.counts);
       setPaused(c.paused);
       setQuietHours(c.quietHours);
       setJobs(j.jobs);
+      setDelayedHighCount(j.delayedHighCount);
       setStaleSince(null);
     } catch (err) {
       // Background polling failure: don't yell at the user every 8s, but do
@@ -126,12 +128,6 @@ export function QueuePage() {
       setBusyAction(null);
     }
   }
-
-  const delayedHighCount = jobs.filter((job) =>
-    job.priority === "high" &&
-    job.state !== "active" &&
-    (job.state === "delayed" || job.deferCount > 0 || Boolean(job.deferReason))
-  ).length;
 
   return (
     <Card>
