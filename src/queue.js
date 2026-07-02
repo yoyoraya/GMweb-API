@@ -41,6 +41,17 @@ class SendQueue {
     });
   }
 
+  deferUntil(data, releaseAt, reason = "scheduled") {
+    const releaseMs = releaseAt instanceof Date ? releaseAt.getTime() : Number(releaseAt);
+    const delay = Math.max(1000, releaseMs - Date.now());
+    return this.enqueue({
+      ...data,
+      priority: "normal",
+      deferReason: reason,
+      deferCount: Number(data?.deferCount || 0) + 1
+    }, { delay });
+  }
+
   async deferHigh(data, successes = 10) {
     const client = await this._redis();
     const sequence = Number(await client.get(SUCCESS_SEQUENCE_KEY)) || 0;
@@ -206,6 +217,7 @@ class SendQueue {
         processedAt: job.processedOn ? new Date(job.processedOn).toISOString() : null,
         finishedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
         delayUntil: job.delay ? new Date(job.timestamp + job.delay).toISOString() : null,
+        deferReason: job.data?.deferReason || null,
         deferCount: Number(job.data?.deferCount || 0)
       });
     }

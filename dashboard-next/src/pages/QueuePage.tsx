@@ -164,7 +164,9 @@ export function QueuePage() {
                     <span>in queue: {elapsed(job.waitingForMs)}</span>
                     {job.state === "active" && <span>active: {elapsed(job.activeForMs)}</span>}
                     {job.stageLabel && <span>stage: {job.stageLabel} ({elapsed(job.stageForMs)})</span>}
-                    {job.state === "delayed" && job.delayUntil && <span>retry: {new Date(job.delayUntil).toLocaleTimeString()}</span>}
+                    {job.state === "delayed" && job.delayUntil && (
+                      <span>{job.deferReason === "quiet_hours" ? "scheduled" : "retry"}: {new Date(job.delayUntil).toLocaleTimeString()}</span>
+                    )}
                   </div>
                   <div
                     className={cn(

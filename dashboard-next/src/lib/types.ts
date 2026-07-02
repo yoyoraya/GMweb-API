@@ -57,6 +57,7 @@ export interface QueueJob {
   processedAt: string | null;
   finishedAt: string | null;
   delayUntil: string | null;
+  deferReason: string | null;
   stage: string | null;
   stageLabel: string | null;
   stageAt: string | null;

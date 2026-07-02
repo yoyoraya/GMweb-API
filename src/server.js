@@ -14,6 +14,7 @@ const { GoogleMessagesClient } = require("./googleMessagesClient");
 const { ApiKeyStore } = require("./apiKeys");
 const { SendQueue } = require("./queue");
 const { SendStore } = require("./sendStore");
+const { sendGate, DEFAULT_TIME_ZONE } = require("./sendSchedule");
 const pkg = require("../package.json");
 
 const app = Fastify({
@@ -503,6 +504,9 @@ const browserRecoveryFile = path.join(config.rootDir, "data", "browser-recovery.
 // prevents bursts; BullMQ's limiter also caps starts across a full minute.
 const SEND_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.SEND_MIN_INTERVAL_MS) || 15000);
 const SEND_MAX_PER_MINUTE = Math.max(1, Number(process.env.SEND_MAX_PER_MINUTE) || 4);
+const SEND_TIME_ZONE = process.env.SEND_TIMEZONE || DEFAULT_TIME_ZONE;
+const SEND_QUIET_START_HOUR = Number(process.env.SEND_QUIET_START_HOUR ?? 2);
+const SEND_QUIET_END_HOUR = Number(process.env.SEND_QUIET_END_HOUR ?? 8);
 let sendFailStreak = 0;
 let recovering = false;
 let recoverEscalations = 0;
@@ -543,6 +547,38 @@ async function waitForSendPace(job) {
 
 function isHighPriorityJob(job) {
   return job?.data?.priority === "high" || Boolean(job?.opts?.lifo);
+}
+
+async function deferQuietHoursJob(job, releaseAt) {
+  const ledger = sendStore.byJob(job.id);
+  const data = {
+    ...job.data,
+    priority: "normal",
+    _ledgerId: ledger?.id || job.data?._ledgerId || null
+  };
+  const releaseIso = releaseAt.toISOString();
+  sendStore.markStatus(job.id, "queued", { attempts: job.attemptsMade || 0 });
+  sendStore.markStage(job.id, "quiet_hours");
+
+  const deferredJob = await sendQueue.deferUntil(data, releaseAt, "quiet_hours");
+  if (data._ledgerId) sendStore.attachJob(data._ledgerId, deferredJob.id);
+  if (data._idempotencyKey && data._bodyHash) {
+    await sendQueue.setIdempotencyJob(data._idempotencyKey, deferredJob.id, data._bodyHash).catch(() => {});
+  }
+
+  const event = {
+    type: "send_deferred",
+    reason: "quiet_hours",
+    jobId: job.id,
+    deferredJobId: deferredJob.id,
+    to: job.data?.to,
+    priority: "normal",
+    timeZone: SEND_TIME_ZONE,
+    releaseAt: releaseIso,
+    at: new Date().toISOString()
+  };
+  emitSse(event);
+  return { deferred: true, ...event };
 }
 
 async function deferConversationJob(job, error) {
@@ -609,6 +645,13 @@ function startSendWorker() {
   sendQueue.startWorker(
     async (job) => {
       // Runs in-process; shares the single Playwright browser via withBrowserLock.
+      const schedule = sendGate(new Date(), {
+        highPriority: isHighPriorityJob(job),
+        timeZone: SEND_TIME_ZONE,
+        startHour: SEND_QUIET_START_HOUR,
+        endHour: SEND_QUIET_END_HOUR
+      });
+      if (schedule.blocked) return deferQuietHoursJob(job, schedule.releaseAt);
       await waitForSendPace(job);
       try {
         const result = await Promise.race([
@@ -919,6 +962,7 @@ function parseLimit(value, fallback, max) {
 
 const STAGE_LABELS = {
   pacing: "Waiting for send pacing",
+  quiet_hours: "Quiet hours (02:00–08:00 Asia/Tehran)",
   legacy_queued: "Imported from the existing Redis backlog",
   legacy_active: "Active job imported from the existing Redis backlog",
   checking_paired: "Checking Google Messages session",
@@ -955,10 +999,12 @@ function enrichQueueJob(job) {
 
   let diagnosis = { code: "queued", severity: "info", message: "Waiting for its turn in the queue" };
   if (job.state === "delayed") {
-    diagnosis = {
-      code: "retry_backoff", severity: "warning",
-      message: job.failedReason ? `Retry scheduled after: ${job.failedReason}` : "Waiting for retry delay"
-    };
+    diagnosis = job.deferReason === "quiet_hours"
+      ? { code: "quiet_hours", severity: "info", message: "Normal SMS paused until 08:00 Asia/Tehran; HIGH priority can send now" }
+      : {
+          code: "retry_backoff", severity: "warning",
+          message: job.failedReason ? `Retry scheduled after: ${job.failedReason}` : "Waiting for retry delay"
+        };
   } else if (job.state === "active") {
     if (stage === "browser_unresponsive" || activeForMs >= SEND_TIMEOUT_MS) {
       diagnosis = { code: "browser_unresponsive", severity: "error", message: "Chrome/Google Messages automation is hung; automatic recovery is scheduled" };
@@ -1626,6 +1672,9 @@ app.post("/send", {
       "continues as before. Use it for time-sensitive transactional messages (e.g. a",
       "renewal confirmation) so they aren't stuck behind a bulk reminder campaign.",
       "",
+      "**Quiet hours:** normal-priority messages are held from 02:00 through 07:59",
+      "`Asia/Tehran` and released at 08:00. High-priority messages bypass quiet hours.",
+      "",
       "**Rate limits (project keys):** configurable per-minute and per-hour (default 10/min, 100/hr).",
       "",
       "**Phone format:** include country code, e.g. `+989121234567`.",
@@ -1642,7 +1691,7 @@ app.post("/send", {
         wait: { type: "boolean", default: false, description: "If true, block until the send completes (max 90s) and return the result." },
         priority: {
           type: ["string", "integer"],
-          description: "Send priority. Use the string `\"high\"` to jump the queue (processed next, ahead of all waiting normal messages); omit or `\"normal\"` for FIFO. A numeric 1-10 is also accepted (1-3 = high)."
+          description: "Send priority. Use `\"high\"` to jump the queue and bypass the 02:00–08:00 Asia/Tehran quiet-hours hold; omit or use `\"normal\"` for FIFO. A numeric 1-10 is also accepted (1-3 = high)."
         }
       },
       examples: [{ to: "+989121234567", text: "Hello from GMweb API!", priority: "high" }]
@@ -1842,6 +1891,9 @@ app.post("/send", {
           jobId: result.deferredJobId,
           status: "deferred",
           priority: result.priority,
+          reason: result.reason,
+          releaseAt: result.releaseAt,
+          timeZone: result.timeZone,
           releaseAfterSuccesses: result.releaseAfterSuccesses
         };
       }
@@ -2050,6 +2102,7 @@ app.get("/admin/queue/jobs", {
                 processedAt: { type: ["string", "null"] },
                 finishedAt: { type: ["string", "null"] },
                 delayUntil: { type: ["string", "null"] },
+                deferReason: { type: ["string", "null"] },
                 stage: { type: ["string", "null"] },
                 stageLabel: { type: ["string", "null"] },
                 stageAt: { type: ["string", "null"] },

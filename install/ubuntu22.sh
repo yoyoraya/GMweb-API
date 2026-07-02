@@ -8,6 +8,7 @@ APP_DIR="${APP_DIR:-/opt/gmweb-api}"
 APP_PORT="${APP_PORT:-3030}"
 DISPLAY_ID="${DISPLAY_ID:-:99}"
 CDP_PORT="${CDP_PORT:-9222}"
+SERVER_TIMEZONE="${SERVER_TIMEZONE:-Asia/Tehran}"
 REPO_URL="${REPO_URL:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -16,6 +17,9 @@ if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run as root: sudo bash install/ubuntu22.sh"
   exit 1
 fi
+
+echo "==> Setting server timezone: $SERVER_TIMEZONE"
+timedatectl set-timezone "$SERVER_TIMEZONE"
 
 as_app_user() {
   runuser -u "$APP_USER" -- bash -lc "$*"
@@ -125,6 +129,9 @@ DASHBOARD_LOGIN_MAX=20
 ADMIN_ACTION_WINDOW_MS=60000
 ADMIN_ACTION_MAX=60
 VNC_PROXY_TARGET=http://127.0.0.1:6080
+SEND_TIMEZONE=Asia/Tehran
+SEND_QUIET_START_HOUR=2
+SEND_QUIET_END_HOUR=8
 ENV
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
@@ -189,6 +196,7 @@ Environment=ROOT_DIR=$APP_DIR
 Environment=USER_DATA_DIR=$APP_DIR/data/browser-profile
 Environment=DISPLAY_ID=$DISPLAY_ID
 Environment=BROWSER_CDP_PORT=$CDP_PORT
+Environment=TZ=$SERVER_TIMEZONE
 ExecStart=$APP_DIR/scripts/vps-chrome.sh
 CPUAccounting=true
 MemoryAccounting=true
@@ -211,6 +219,7 @@ Type=simple
 User=$APP_USER
 WorkingDirectory=$APP_DIR
 Environment=NODE_ENV=production
+Environment=TZ=$SERVER_TIMEZONE
 ExecStart=/usr/bin/npm start
 CPUAccounting=true
 MemoryAccounting=true

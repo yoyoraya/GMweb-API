@@ -19,6 +19,7 @@ CDP_PORT="${CDP_PORT:-9222}"
 DISPLAY_ID="${DISPLAY_ID:-:99}"
 VNC_PORT="${VNC_PORT:-5900}"
 NOVNC_PORT="${NOVNC_PORT:-6080}"
+SERVER_TIMEZONE="${SERVER_TIMEZONE:-Asia/Tehran}"
 REPO_URL="${REPO_URL:-https://github.com/yoyoraya/GMweb-API.git}"
 LOG_DIR="/var/log/gmweb"
 STATE_DIR="/var/lib/gmweb"
@@ -138,6 +139,12 @@ install_packages() {
   redis-cli ping >/dev/null 2>&1 && ok "Redis running" || warn "Redis not responding — queue won't work until it does."
 }
 
+configure_timezone() {
+  step "Configuring server timezone"
+  timedatectl set-timezone "$SERVER_TIMEZONE"
+  ok "Server timezone: $(timedatectl show -p Timezone --value)"
+}
+
 sync_app() {
   step "Placing app in $APP_DIR"
   id "$APP_USER" >/dev/null 2>&1 || { useradd --system --create-home --shell /bin/bash "$APP_USER"; ok "Created user $APP_USER"; }
@@ -214,6 +221,9 @@ SEND_TIMEOUT_MS=240000
 SEND_FAIL_RESTART_THRESHOLD=3
 SEND_MIN_INTERVAL_MS=15000
 SEND_MAX_PER_MINUTE=4
+SEND_TIMEZONE=Asia/Tehran
+SEND_QUIET_START_HOUR=2
+SEND_QUIET_END_HOUR=8
 CONVERSATION_HISTORY_MAX_BATCHES=80
 ENV
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"; chmod 600 "$APP_DIR/.env"
@@ -246,6 +256,7 @@ Environment=ROOT_DIR=$APP_DIR
 Environment=USER_DATA_DIR=$APP_DIR/data/browser-profile
 Environment=DISPLAY_ID=$DISPLAY_ID
 Environment=BROWSER_CDP_PORT=$CDP_PORT
+Environment=TZ=$SERVER_TIMEZONE
 ExecStart=$APP_DIR/scripts/vps-chrome.sh
 CPUAccounting=true
 MemoryAccounting=true
@@ -267,6 +278,7 @@ Type=simple
 User=$APP_USER
 WorkingDirectory=$APP_DIR
 Environment=NODE_ENV=production
+Environment=TZ=$SERVER_TIMEZONE
 ExecStart=/usr/bin/npm start
 CPUAccounting=true
 MemoryAccounting=true
@@ -382,7 +394,7 @@ show_credentials() {
 do_full_install() {
   banner; preflight || { pause; return; }
   echo; confirm "Proceed with full install?" || return
-  install_packages && sync_app && write_env && install_systemd && start_core
+  configure_timezone && install_packages && sync_app && write_env && install_systemd && start_core
   show_credentials
   echo
   if confirm "Google Messages is not paired yet. Run the pairing wizard now?"; then

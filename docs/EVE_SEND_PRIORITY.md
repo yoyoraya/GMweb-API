@@ -35,6 +35,13 @@ Content-Type: application/json
 The call is **asynchronous by default**: it returns immediately with `202` and a
 `jobId`. The actual send happens in the background.
 
+## Tehran quiet hours
+
+From **02:00 through 07:59 Asia/Tehran**, normal-priority messages remain in the
+durable queue and are scheduled for 08:00. A `"high"` priority message bypasses
+quiet hours and is sent immediately. The server installer also sets the Linux
+system timezone to `Asia/Tehran`.
+
 ---
 
 ## Normal send (bulk campaign — use this for reminders)

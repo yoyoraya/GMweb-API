@@ -6,6 +6,7 @@ const path = require("node:path");
 const { GoogleMessagesClient } = require("../src/googleMessagesClient");
 const { SendQueue } = require("../src/queue");
 const { SendStore } = require("../src/sendStore");
+const { sendSchedule, sendGate } = require("../src/sendSchedule");
 
 function client() {
   return new GoogleMessagesClient({
@@ -91,6 +92,41 @@ test("normal misses go to the queue tail and high misses wait ten successes", as
   assert.equal(high.job.opts.lifo, true);
   assert(high.job.opts.delay > 300 * 24 * 60 * 60 * 1000);
   assert.deepEqual(zadds[0], ["gmweb-send:deferred-high", 17, high.job.id]);
+});
+
+test("Tehran quiet hours block normal sends from 02:00 until 08:00", () => {
+  const before = sendSchedule(new Date("2026-07-01T22:29:59.000Z")); // 01:59:59 Tehran
+  const start = sendSchedule(new Date("2026-07-01T22:30:00.000Z"));  // 02:00 Tehran
+  const middle = sendSchedule(new Date("2026-07-02T00:00:00.000Z")); // 03:30 Tehran
+  const end = sendSchedule(new Date("2026-07-02T04:30:00.000Z"));    // 08:00 Tehran
+  assert.equal(before.blocked, false);
+  assert.equal(start.blocked, true);
+  assert.equal(start.releaseAt.toISOString(), "2026-07-02T04:30:00.000Z");
+  assert.equal(middle.blocked, true);
+  assert.equal(middle.releaseAt.toISOString(), "2026-07-02T04:30:00.000Z");
+  assert.equal(end.blocked, false);
+  const high = sendGate(new Date("2026-07-02T00:00:00.000Z"), { highPriority: true });
+  assert.equal(high.blocked, false);
+  assert.equal(high.bypassed, true);
+});
+
+test("quiet-hour deferral creates a durable delayed normal job", async () => {
+  const q = Object.create(SendQueue.prototype);
+  let added;
+  q.enqueue = async (data, opts) => {
+    added = { data, opts };
+    return { id: "next", data, opts };
+  };
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-02T00:00:00.000Z");
+  try {
+    await q.deferUntil({ to: "1", text: "normal" }, new Date("2026-07-02T04:30:00.000Z"), "quiet_hours");
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(added.data.priority, "normal");
+  assert.equal(added.data.deferReason, "quiet_hours");
+  assert.equal(added.opts.delay, 4.5 * 60 * 60 * 1000);
 });
 
 test("previous-year timestamps stop sidebar warm-up", () => {

@@ -1,5 +1,13 @@
 # GMweb API Operations
 
+## Tehran timezone and quiet hours
+
+Installers set the Linux server timezone to `Asia/Tehran`. The send worker also
+uses that timezone explicitly: normal-priority SMS jobs are durably delayed from
+02:00 through 07:59 and released at 08:00. HIGH-priority jobs bypass this rule.
+The defaults can be changed with `SEND_TIMEZONE`, `SEND_QUIET_START_HOUR`, and
+`SEND_QUIET_END_HOUR`.
+
 ## Browser automation health and automatic recovery
 
 `gmweb-monitor.timer` runs every two minutes. In addition to `/health` and
